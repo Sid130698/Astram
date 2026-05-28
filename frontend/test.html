@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Astram WebSocket Test</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.6.1/sockjs.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+  <style>
+    body { font-family: monospace; background: #0a0a0a; color: #00ff88; padding: 20px; }
+    #log { border: 1px solid #00ff88; padding: 10px; height: 300px; overflow-y: scroll; margin: 10px 0; }
+    input, button { background: #1a1a1a; color: #00ff88; border: 1px solid #00ff88; padding: 8px; }
+    button { cursor: pointer; margin-left: 5px; }
+    button:hover { background: #00ff88; color: #0a0a0a; }
+    #status { margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+<h2>🏹 ASTRAM — WebSocket Test</h2>
+<div id="status">Status: <span id="statusText" style="color:red">Disconnected</span></div>
+<div id="log"></div>
+<input type="text" id="sender" placeholder="Your name" value="Player1" style="width:100px"/>
+<input type="text" id="message" placeholder="Type a message..." style="width:250px"/>
+<button onclick="sendMessage()">Send</button>
+
+<script>
+  let stompClient = null;
+
+  function log(msg, color = '#00ff88') {
+    const div = document.getElementById('log');
+    div.innerHTML += `<div style="color:${color}">[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+    div.scrollTop = div.scrollHeight;
+  }
+
+  function connect() {
+    const socket = new SockJS('http://localhost:8080/ws');
+    stompClient = Stomp.over(socket);
+    stompClient.debug = null; // silence console noise
+
+    stompClient.connect({}, function (frame) {
+      document.getElementById('statusText').innerText = 'Connected ✅';
+      document.getElementById('statusText').style.color = '#00ff88';
+      log('Connected to Astram backend');
+
+      // Subscribe to the game topic
+      stompClient.subscribe('/topic/game', function (message) {
+        const body = JSON.parse(message.body);
+        log(`📨 ${body.sender}: ${body.content}`, '#ffdd57');
+      });
+
+    }, function (error) {
+      document.getElementById('statusText').innerText = 'Error ❌';
+      log('Connection error: ' + error, 'red');
+    });
+  }
+
+  function sendMessage() {
+    const sender = document.getElementById('sender').value;
+    const content = document.getElementById('message').value;
+    if (!content || !stompClient) return;
+
+    stompClient.send('/app/game.test', {}, JSON.stringify({
+      type: 'TEST',
+      sender: sender,
+      content: content
+    }));
+
+    document.getElementById('message').value = '';
+  }
+
+  // Allow Enter key to send
+  document.addEventListener('keypress', function(e) {
+    if (e.key === 'Enter') sendMessage();
+  });
+
+  // Auto connect on load
+  connect();
+</script>
+</body>
+</html>
