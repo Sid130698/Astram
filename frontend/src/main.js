@@ -1,22 +1,18 @@
 import Phaser from 'phaser';
 
 // ─── ANIMATION FRAME MAP (single horizontal strip) ───────────────
-// Frame 0–4:   Idle  (5 frames)
-// Frame 5–12:  Run   (8 frames)  — unused
-// Frame 13–23: Fire  (11 frames)
-// Frame 24–28: Hit   (5 frames)
-// Frame 29–34: Death (6 frames)
 const ANIM = {
     IDLE:    { start: 0,  end: 4  },
     FIRE:    { start: 13, end: 23 },
-    RELEASE: { start: 18, end: 23 }, // just the release + follow-through
+    RELEASE: { start: 18, end: 23 },
     HIT:     { start: 24, end: 28 },
     DEATH:   { start: 29, end: 34 }
 };
 
-const GRAVITY    = 600;
+const GRAVITY        = 600;
 const LAUNCH_MUL = 4;
-const ARROW_DELAY_MS = 180; // ms to wait before spawning arrow (sync with release frame)
+const ARROW_DELAY_MS = 180;
+const GROUND_Y_LEVEL = 530; // The coordinate where the player's feet rest
 
 class GameScene extends Phaser.Scene {
     constructor() {
@@ -24,59 +20,50 @@ class GameScene extends Phaser.Scene {
         this.isDragging    = false;
         this.player        = null;
         this.aimGraphics   = null;
+        this.groundGroup   = null;
         this.globalPointer = { x: 0, y: 0 };
         this.pendingVx     = 0;
         this.pendingVy     = 0;
     }
 
-    // ─── PRELOAD ──────────────────────────────────────────────────
+    // ─── LIFECYCLE HOOKS ──────────────────────────────────────────
     preload() {
         this.load.image('background', '/battleground.png');
-
+        this.load.image('arrow', '/archer-assets/arrow.png');
         this.load.spritesheet('archer', '/archer-assets/archer-yellow.png', {
             frameWidth:  64,
             frameHeight: 64
         });
-
-        this.load.image('arrow', '/archer-assets/arrow.png');
     }
 
-    // ─── CREATE ───────────────────────────────────────────────────
     create() {
-        this.renderBackground();
-        this.renderTitle();
-        this.aimGraphics = this.add.graphics().setDepth(20);
-        this.spawnPlayer();
-        this.buildAnimations();
-        this.wireInput();
+        this.initializeEnvironment();
+        this.initializeActors();
+        this.initializePhysicsBoundaries();
+        this.initializeAnimations();
+        this.initializeInputPipeline();
     }
 
-    // ─── UPDATE ───────────────────────────────────────────────────
     update() {
-        this.children.getChildren().forEach(child => {
-            if (child.getData?.('isArrow') && child.body) {
-                child.setRotation(
-                    Math.atan2(child.body.velocity.y, child.body.velocity.x)
-                );
-            }
-        });
+        this.executeRealTimeRotations();
     }
 
-    // ─── BACKGROUND ──────────────────────────────────────────────
-    renderBackground() {
+    // ==========================================
+    // 1. SUB-SYSTEM INITIALIZATION MODULES
+    // ==========================================
+
+    initializeEnvironment() {
+        // Render background scene
         this.add.image(400, 300, 'background')
             .setDisplaySize(800, 600)
             .setDepth(0);
 
+        // Lower vignette layout shading
         const vignette = this.add.graphics().setDepth(1);
-        vignette.fillGradientStyle(
-            0x000000, 0x000000, 0x000000, 0x000000,
-            0, 0, 0.7, 0.7
-        );
+        vignette.fillGradientStyle(0x000000, 0x000000, 0x000000, 0x000000, 0, 0, 0.7, 0.7);
         vignette.fillRect(0, 430, 800, 170);
-    }
 
-    renderTitle() {
+        // Render typography headers
         this.add.text(400, 28, 'ASTRAM', {
             fontSize: '44px',
             fontFamily: 'Georgia, serif',
@@ -95,8 +82,7 @@ class GameScene extends Phaser.Scene {
         }).setOrigin(0.5).setDepth(10);
     }
 
-    // ─── PLAYER ──────────────────────────────────────────────────
-    spawnPlayer() {
+    initializeActors() {
         this.player = this.physics.add.sprite(130, 460, 'archer')
             .setScale(2.2)
             .setDepth(5);
@@ -104,8 +90,17 @@ class GameScene extends Phaser.Scene {
         this.player.setCollideWorldBounds(true);
     }
 
-    buildAnimations() {
-        // Idle — loops forever
+    initializePhysicsBoundaries() {
+        // Initialize dynamic aiming vector overlay graphics context
+        this.aimGraphics = this.add.graphics().setDepth(20);
+
+        // Programmatically generate our localized lower landing plane boundary
+        this.groundGroup = this.physics.add.staticGroup();
+        let groundLine = this.add.rectangle(400, GROUND_Y_LEVEL, 800, 10, 0x000000, 0);
+        this.groundGroup.add(groundLine);
+    }
+
+    initializeAnimations() {
         this.anims.create({
             key: 'idle',
             frames: this.anims.generateFrameNumbers('archer', ANIM.IDLE),
@@ -113,7 +108,6 @@ class GameScene extends Phaser.Scene {
             repeat: -1
         });
 
-        // Full fire — draw + release + follow through
         this.anims.create({
             key: 'fire',
             frames: this.anims.generateFrameNumbers('archer', ANIM.FIRE),
@@ -121,7 +115,6 @@ class GameScene extends Phaser.Scene {
             repeat: 0
         });
 
-        // Release only — just the second half of fire (used when releasing)
         this.anims.create({
             key: 'release',
             frames: this.anims.generateFrameNumbers('archer', ANIM.RELEASE),
@@ -129,7 +122,6 @@ class GameScene extends Phaser.Scene {
             repeat: 0
         });
 
-        // Hit reaction
         this.anims.create({
             key: 'hit',
             frames: this.anims.generateFrameNumbers('archer', ANIM.HIT),
@@ -137,7 +129,7 @@ class GameScene extends Phaser.Scene {
             repeat: 0
         });
 
-        // Return to idle after any one-shot animation
+        // Lifecycle hook to cycle animation sequences gracefully back to idle state
         this.player.on('animationcomplete', () => {
             this.player.play('idle');
         });
@@ -145,153 +137,176 @@ class GameScene extends Phaser.Scene {
         this.player.play('idle');
     }
 
-    // ─── INPUT ───────────────────────────────────────────────────
-    wireInput() {
-        this.input.on('pointerdown', (p) => {
-            const dist = Phaser.Math.Distance.Between(
-                p.x, p.y, this.player.x, this.player.y
-            );
-            if (dist < 120) {
-                this.isDragging = true;
-                // Show fully drawn bow pose — frame 17 is peak draw
-                this.player.anims.stop();
-                this.player.setFrame(17);
-            }
-        });
+    // ==========================================
+    // 2. INPUT HANDLERS & TRACKING ENGINE
+    // ==========================================
 
-        window.addEventListener('mousemove', (e) => {
-            this.syncPointer(e.clientX, e.clientY);
-            if (this.isDragging) this.drawArc(this.globalPointer);
-        });
+    initializeInputPipeline() {
+        this.input.on('pointerdown', this.handlePointerDown, this);
 
-        window.addEventListener('mouseup', (e) => {
-            if (!this.isDragging) return;
-            this.syncPointer(e.clientX, e.clientY);
-            this.release();
-        });
+        // Bind global browser mouse event proxies to calculate off-canvas coordinates
+        window.addEventListener('mousemove', (e) => this.processDragMovement(e.clientX, e.clientY));
+        window.addEventListener('mouseup', (e) => this.processDragTermination(e.clientX, e.clientY));
 
+        // Register tracking rules for cross-platform mobile surface gestures
         window.addEventListener('touchmove', (e) => {
             e.preventDefault();
-            const t = e.touches[0];
-            this.syncPointer(t.clientX, t.clientY);
-            if (this.isDragging) this.drawArc(this.globalPointer);
+            const touch = e.touches[0];
+            this.processDragMovement(touch.clientX, touch.clientY);
         }, { passive: false });
 
         window.addEventListener('touchend', (e) => {
             if (!this.isDragging) return;
-            const t = e.changedTouches[0];
-            this.syncPointer(t.clientX, t.clientY);
-            this.release();
+            const touch = e.changedTouches[0];
+            this.processDragTermination(touch.clientX, touch.clientY);
         });
     }
 
-    syncPointer(cx, cy) {
-        const rect = this.sys.game.canvas.getBoundingClientRect();
-        this.globalPointer.x = cx - rect.left;
-        this.globalPointer.y = cy - rect.top;
+    synchronizeCoordinates(clientX, clientY) {
+        const bounds = this.sys.game.canvas.getBoundingClientRect();
+        this.globalPointer.x = clientX - bounds.left;
+        this.globalPointer.y = clientY - bounds.top;
     }
 
-    release() {
+    handlePointerDown(pointer) {
+        const distance = Phaser.Math.Distance.Between(pointer.x, pointer.y, this.player.x, this.player.y);
+        if (distance < 120) {
+            this.isDragging = true;
+            this.player.anims.stop();
+            this.player.setFrame(17); // Snaps immediately to structural peak draw posture frame
+        }
+    }
+
+    processDragMovement(clientX, clientY) {
+        if (!this.isDragging) return;
+        this.synchronizeCoordinates(clientX, clientY);
+        this.calculateAimTrajectory(this.globalPointer);
+    }
+
+    processDragTermination(clientX, clientY) {
+        if (!this.isDragging) return;
+        this.synchronizeCoordinates(clientX, clientY);
         this.isDragging = false;
         this.aimGraphics.clear();
-        this.shoot(this.globalPointer);
+        this.executeLaunchSequence(this.globalPointer);
     }
 
-    // ─── AIM ARC ─────────────────────────────────────────────────
-    drawArc(pos) {
+    // ==========================================
+    // 3. GRAPHICS LAYER RENDERING OPERATIONS
+    // ==========================================
+
+    calculateAimTrajectory(pos) {
         this.aimGraphics.clear();
 
         const vx = (this.player.x - pos.x) * LAUNCH_MUL;
         const vy = (this.player.y - pos.y) * LAUNCH_MUL;
 
-        // Only draw arc when pulling in valid shot direction
-        if (vx < 0) return;
+        if (vx < 0) return; // Prevent inverse firing mechanics toward the left edge boundary
 
         const dt = 0.025;
-        let x    = this.player.x;
-        let y    = this.player.y;
-        let pvx  = vx;
-        let pvy  = vy;
+        let projectX = this.player.x;
+        let projectY = this.player.y;
+        let runningVx = vx;
+        let runningVy = vy;
 
+        // Render parabolic simulation track preview
         for (let i = 0; i < 40; i++) {
-            x   += pvx * dt;
-            y   += pvy * dt;
-            pvy += GRAVITY * dt;
+            projectX += runningVx * dt;
+            projectY += runningVy * dt;
+            runningVy += GRAVITY * dt;
 
-            if (y > 590 || x > 810 || x < -10) break;
+            if (projectY > 590 || projectX > 810 || projectX < -10) break;
 
             const alpha = 1 - i / 40;
-
-            // Outer glow
             this.aimGraphics.fillStyle(0xFF8800, alpha * 0.3);
-            this.aimGraphics.fillCircle(x, y, 7);
+            this.aimGraphics.fillCircle(projectX, projectY, 7);
 
-            // Core dot — dashed feel
             if (i % 2 === 0) {
                 this.aimGraphics.fillStyle(0xFFFFFF, alpha);
-                this.aimGraphics.fillCircle(x, y, 4);
+                this.aimGraphics.fillCircle(projectX, projectY, 4);
             }
         }
 
-        // Power ring around archer
-        const dragDist = Phaser.Math.Distance.Between(
-            this.player.x, this.player.y, pos.x, pos.y
-        );
-        const power = Math.min(dragDist / 200, 1);
-        const ringColor = power < 0.4  ? 0x00FF88
-            : power < 0.75 ? 0xFFAA00
-                : 0xFF2200;
-
-        this.aimGraphics.lineStyle(2, ringColor, 0.85);
-        this.aimGraphics.strokeCircle(
-            this.player.x, this.player.y,
-            28 + power * 35
-        );
+        this.renderTensionRing(pos);
     }
 
-    // ─── SHOOT ───────────────────────────────────────────────────
-    shoot(pos) {
+    renderTensionRing(pos) {
+        const dragDistance = Phaser.Math.Distance.Between(this.player.x, this.player.y, pos.x, pos.y);
+        const powerRatio = Math.min(dragDistance / 200, 1);
+        const ringColor = powerRatio < 0.4 ? 0x00FF88 : powerRatio < 0.75 ? 0xFFAA00 : 0xFF2200;
+
+        this.aimGraphics.lineStyle(2, ringColor, 0.85);
+        this.aimGraphics.strokeCircle(this.player.x, this.player.y, 28 + powerRatio * 35);
+    }
+
+    // ==========================================
+    // 4. LAUNCH EXECUTION & IMPACT COLLISIONS
+    // ==========================================
+
+    executeLaunchSequence(pos) {
         const vx = (this.player.x - pos.x) * LAUNCH_MUL;
         const vy = (this.player.y - pos.y) * LAUNCH_MUL;
 
-        // Ignore accidental taps
         if (vx < 20) {
             this.player.play('idle');
             return;
         }
 
-        // Store velocity for delayed arrow spawn
         this.pendingVx = vx;
         this.pendingVy = vy;
-
-        // Play release animation immediately (starts from peak draw frame)
         this.player.play('release');
 
-        // Spawn arrow after delay — syncs with visual release frame
+        // Delay arrow generation to perfectly sync up with animation timing frame loops
         this.time.delayedCall(ARROW_DELAY_MS, () => {
-            this.spawnArrow(this.pendingVx, this.pendingVy);
+            this.instantiateArrowProjectile(this.pendingVx, this.pendingVy);
         });
     }
 
-    spawnArrow(vx, vy) {
-        const arrow = this.physics.add.image(
-            this.player.x + 30,
-            this.player.y - 10,
-            'arrow'
-        ).setDepth(7).setScale(1.5);
+    instantiateArrowProjectile(vx, vy) {
+        const arrow = this.physics.add.image(this.player.x + 30, this.player.y - 10, 'arrow')
+            .setDepth(7)
+            .setScale(1.5);
 
         arrow.setVelocity(vx, vy);
         arrow.setData('isArrow', true);
 
-        // Fire trail
+        // Register localized terrain contact logic
+        this.registerGroundImpactCollider(arrow);
+
+        this.spawnParticleTrail(arrow);
+
+        // Automatic engine trash-collector fallback cleanup (3.5 seconds boundary max)
+        this.time.delayedCall(3500, () => {
+            if (arrow && arrow.active) arrow.destroy();
+        });
+    }
+
+    registerGroundImpactCollider(arrowInstance) {
+        this.physics.add.collider(arrowInstance, this.groundGroup, (arrowObj) => {
+            // Freeze positions instantaneously on contact
+            arrowObj.body.setVelocity(0, 0);
+            arrowObj.body.setAngularVelocity(0);
+            arrowObj.body.setAllowGravity(false);
+
+            // Terminate engine computational transformations on this specific body container
+            arrowObj.body.enable = false;
+
+            // Clear configuration data tags so the dynamic frame calculations ignore it
+            arrowObj.setData('isArrow', false);
+        });
+    }
+
+    spawnParticleTrail(arrowInstance) {
         this.time.addEvent({
             delay: 18,
             repeat: 25,
             callback: () => {
-                if (!arrow.active) return;
+                if (!arrowInstance.active || !arrowInstance.body || arrowInstance.body.enable === false) return;
+
                 const trail = this.add.graphics().setDepth(6);
                 trail.fillStyle(0xFF6600, 0.35);
-                trail.fillCircle(arrow.x, arrow.y, 5);
+                trail.fillCircle(arrowInstance.x, arrowInstance.y, 5);
+
                 this.tweens.add({
                     targets: trail,
                     alpha: 0,
@@ -302,15 +317,18 @@ class GameScene extends Phaser.Scene {
                 });
             }
         });
+    }
 
-        // Auto-destroy after 3.5s
-        this.time.delayedCall(3500, () => {
-            if (arrow?.active) arrow.destroy();
+    executeRealTimeRotations() {
+        this.children.getChildren().forEach(child => {
+            if (child.getData?.('isArrow') && child.body) {
+                child.setRotation(Math.atan2(child.body.velocity.y, child.body.velocity.x));
+            }
         });
     }
 }
 
-// ─── GAME CONFIG ─────────────────────────────────────────────────
+// ─── STABLE CORE APPLICATION FRAMEWORK PROPERTIES ─────────────────
 const config = {
     type: Phaser.AUTO,
     width: 800,
