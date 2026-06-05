@@ -13,12 +13,15 @@ const GRAVITY        = 600;
 const LAUNCH_MUL = 4;
 const ARROW_DELAY_MS = 180;
 const GROUND_Y_LEVEL = 530; // The coordinate where the player's feet rest
+const PLAYER_TEXTURE_KEY = 'archer';
+const ENEMY_TEXTURE_KEY = 'archer-enemy';
 
 class GameScene extends Phaser.Scene {
     constructor() {
         super({ key: 'GameScene' });
         this.isDragging    = false;
         this.player        = null;
+        this.enemy         = null;
         this.aimGraphics   = null;
         this.groundGroup   = null;
         this.globalPointer = { x: 0, y: 0 };
@@ -30,7 +33,11 @@ class GameScene extends Phaser.Scene {
     preload() {
         this.load.image('background', '/battleground.png');
         this.load.image('arrow', '/archer-assets/arrow.png');
-        this.load.spritesheet('archer', '/archer-assets/archer-yellow.png', {
+        this.load.spritesheet(PLAYER_TEXTURE_KEY, '/archer-assets/archer-yellow.png', {
+            frameWidth:  64,
+            frameHeight: 64
+        });
+        this.load.spritesheet(ENEMY_TEXTURE_KEY, '/archer-assets/GandalfHardcore Archer red sheet.png', {
             frameWidth:  64,
             frameHeight: 64
         });
@@ -83,11 +90,18 @@ class GameScene extends Phaser.Scene {
     }
 
     initializeActors() {
-        this.player = this.physics.add.sprite(130, 460, 'archer')
+        this.player = this.physics.add.sprite(130, 460, PLAYER_TEXTURE_KEY)
             .setScale(2.2)
             .setDepth(5);
         this.player.body.setAllowGravity(false);
         this.player.setCollideWorldBounds(true);
+
+        this.enemy = this.physics.add.sprite(670, 460, ENEMY_TEXTURE_KEY)
+            .setScale(2.2)
+            .setFlipX(true)
+            .setDepth(5);
+        this.enemy.body.setAllowGravity(false);
+        this.enemy.setCollideWorldBounds(true);
     }
 
     initializePhysicsBoundaries() {
@@ -102,39 +116,47 @@ class GameScene extends Phaser.Scene {
 
     initializeAnimations() {
         this.anims.create({
-            key: 'idle',
-            frames: this.anims.generateFrameNumbers('archer', ANIM.IDLE),
+            key: 'player-idle',
+            frames: this.anims.generateFrameNumbers(PLAYER_TEXTURE_KEY, ANIM.IDLE),
             frameRate: 6,
             repeat: -1
         });
 
         this.anims.create({
-            key: 'fire',
-            frames: this.anims.generateFrameNumbers('archer', ANIM.FIRE),
+            key: 'player-fire',
+            frames: this.anims.generateFrameNumbers(PLAYER_TEXTURE_KEY, ANIM.FIRE),
             frameRate: 14,
             repeat: 0
         });
 
         this.anims.create({
-            key: 'release',
-            frames: this.anims.generateFrameNumbers('archer', ANIM.RELEASE),
+            key: 'player-release',
+            frames: this.anims.generateFrameNumbers(PLAYER_TEXTURE_KEY, ANIM.RELEASE),
             frameRate: 14,
             repeat: 0
         });
 
         this.anims.create({
-            key: 'hit',
-            frames: this.anims.generateFrameNumbers('archer', ANIM.HIT),
+            key: 'player-hit',
+            frames: this.anims.generateFrameNumbers(PLAYER_TEXTURE_KEY, ANIM.HIT),
             frameRate: 10,
             repeat: 0
         });
 
-        // Lifecycle hook to cycle animation sequences gracefully back to idle state
-        this.player.on('animationcomplete', () => {
-            this.player.play('idle');
+        this.anims.create({
+            key: 'enemy-idle',
+            frames: this.anims.generateFrameNumbers(ENEMY_TEXTURE_KEY, ANIM.IDLE),
+            frameRate: 10,
+            repeat: -1
         });
 
-        this.player.play('idle');
+        // Lifecycle hook to cycle animation sequences gracefully back to idle state
+        this.player.on('animationcomplete', () => {
+            this.player.play('player-idle');
+        });
+
+        this.player.play('player-idle');
+        this.enemy.play('enemy-idle');
     }
 
     // ==========================================
@@ -248,13 +270,13 @@ class GameScene extends Phaser.Scene {
         const vy = (this.player.y - pos.y) * LAUNCH_MUL;
 
         if (vx < 20) {
-            this.player.play('idle');
+            this.player.play('player-idle');
             return;
         }
 
         this.pendingVx = vx;
         this.pendingVy = vy;
-        this.player.play('release');
+        this.player.play('player-release');
 
         // Delay arrow generation to perfectly sync up with animation timing frame loops
         this.time.delayedCall(ARROW_DELAY_MS, () => {
