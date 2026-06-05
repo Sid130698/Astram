@@ -24,12 +24,14 @@ class GameScene extends Phaser.Scene {
     constructor() {
         super({ key: 'GameScene' });
         this.isDragging    = false;
+        this.isPlayerTurn  = true;
         this.player        = null;
         this.enemy         = null;
         this.playerHp      = 100;
         this.enemyHp       = 100;
         this.aimGraphics   = null;
         this.hudGraphics   = null;
+        this.turnIndicator = null;
         this.groundGroup   = null;
         this.globalPointer = { x: 0, y: 0 };
         this.pendingVx     = 0;
@@ -127,6 +129,12 @@ class GameScene extends Phaser.Scene {
     initializeHud() {
         this.hudGraphics = this.add.graphics().setDepth(15);
         this.renderHealthBars();
+        this.initializeTurnIndicator();
+    }
+
+    initializeTurnIndicator() {
+        this.turnIndicator = this.add.graphics().setDepth(16);
+        this.updateTurnIndicator();
     }
 
     initializeAnimations() {
@@ -225,6 +233,29 @@ class GameScene extends Phaser.Scene {
         this.hudGraphics.fillRoundedRect(x + 4, y + 4, fillWidth, height - 8, 4);
     }
 
+    updateTurnIndicator() {
+        if (!this.turnIndicator) return;
+
+        const activeActor = this.isPlayerTurn ? this.player : this.enemy;
+        if (!activeActor) return;
+
+        this.turnIndicator.clear();
+        const ringX = activeActor.x + (this.isPlayerTurn ? -12 : 12);
+        const ringY = activeActor.y + 84;
+
+        this.turnIndicator.fillStyle(0xffd54a, 0.18);
+        this.turnIndicator.lineStyle(3, 0xffd54a, 0.95);
+        this.turnIndicator.fillEllipse(ringX, ringY, 96, 18);
+        this.turnIndicator.strokeEllipse(ringX, ringY, 96, 18);
+        this.turnIndicator.lineStyle(1.5, 0xfff1b8, 0.8);
+        this.turnIndicator.strokeEllipse(ringX, ringY, 68, 10);
+
+        if (this.player && this.enemy) {
+            this.player.setAlpha(this.isPlayerTurn ? 1 : 0.78);
+            this.enemy.setAlpha(this.isPlayerTurn ? 0.78 : 1);
+        }
+    }
+
     // ==========================================
     // 2. INPUT HANDLERS & TRACKING ENGINE
     // ==========================================
@@ -257,6 +288,8 @@ class GameScene extends Phaser.Scene {
     }
 
     handlePointerDown(pointer) {
+        if (!this.isPlayerTurn) return;
+
         const distance = Phaser.Math.Distance.Between(pointer.x, pointer.y, this.player.x, this.player.y);
         if (distance < 120) {
             this.isDragging = true;
