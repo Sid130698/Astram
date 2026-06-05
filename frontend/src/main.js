@@ -22,7 +22,10 @@ class GameScene extends Phaser.Scene {
         this.isDragging    = false;
         this.player        = null;
         this.enemy         = null;
+        this.playerHp      = 100;
+        this.enemyHp       = 100;
         this.aimGraphics   = null;
+        this.hudGraphics   = null;
         this.groundGroup   = null;
         this.globalPointer = { x: 0, y: 0 };
         this.pendingVx     = 0;
@@ -48,6 +51,7 @@ class GameScene extends Phaser.Scene {
         this.initializeActors();
         this.initializePhysicsBoundaries();
         this.initializeAnimations();
+        this.initializeHud();
         this.initializeInputPipeline();
     }
 
@@ -114,6 +118,11 @@ class GameScene extends Phaser.Scene {
         this.groundGroup.add(groundLine);
     }
 
+    initializeHud() {
+        this.hudGraphics = this.add.graphics().setDepth(15);
+        this.renderHealthBars();
+    }
+
     initializeAnimations() {
         this.anims.create({
             key: 'player-idle',
@@ -157,6 +166,32 @@ class GameScene extends Phaser.Scene {
 
         this.player.play('player-idle');
         this.enemy.play('enemy-idle');
+    }
+
+    renderHealthBars() {
+        const barWidth = 220;
+        const barHeight = 22;
+        const fillInset = 4;
+        const leftBarX = 36;
+        const rightBarX = 800 - leftBarX - barWidth;
+        const barY = 24;
+        const playerFillWidth = (barWidth - fillInset * 2) * Phaser.Math.Clamp(this.playerHp / 100, 0, 1);
+        const enemyFillWidth = (barWidth - fillInset * 2) * Phaser.Math.Clamp(this.enemyHp / 100, 0, 1);
+
+        this.hudGraphics.clear();
+
+        this.drawHealthBar(leftBarX, barY, barWidth, barHeight, playerFillWidth, 0xFFD54A);
+        this.drawHealthBar(rightBarX, barY, barWidth, barHeight, enemyFillWidth, 0xD94B4B);
+    }
+
+    drawHealthBar(x, y, width, height, fillWidth, fillColor) {
+        this.hudGraphics.fillStyle(0x120b08, 0.92);
+        this.hudGraphics.fillRoundedRect(x, y, width, height, 6);
+        this.hudGraphics.lineStyle(2, 0x3c2618, 1);
+        this.hudGraphics.strokeRoundedRect(x, y, width, height, 6);
+
+        this.hudGraphics.fillStyle(fillColor, 1);
+        this.hudGraphics.fillRoundedRect(x + 4, y + 4, fillWidth, height - 8, 4);
     }
 
     // ==========================================
