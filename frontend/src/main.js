@@ -15,6 +15,10 @@ const ARROW_DELAY_MS = 180;
 const GROUND_Y_LEVEL = 530; // The coordinate where the player's feet rest
 const PLAYER_TEXTURE_KEY = 'archer';
 const ENEMY_TEXTURE_KEY = 'archer-enemy';
+const ENEMY_HITBOX = { width: 28, height: 44, offsetX: 18, offsetY: 12 };
+const ARROW_HITBOX = { width: 14, height: 5, offsetX: 8, offsetY: 8 };
+const ARROW_HIT_LINGER_MS = 180;
+const ARROW_HIT_EMBED_PX = 10;
 
 class GameScene extends Phaser.Scene {
     constructor() {
@@ -106,6 +110,8 @@ class GameScene extends Phaser.Scene {
             .setDepth(5);
         this.enemy.body.setAllowGravity(false);
         this.enemy.setCollideWorldBounds(true);
+        this.enemy.body.setSize(ENEMY_HITBOX.width, ENEMY_HITBOX.height);
+        this.enemy.body.setOffset(ENEMY_HITBOX.offsetX, ENEMY_HITBOX.offsetY);
     }
 
     initializePhysicsBoundaries() {
@@ -159,9 +165,34 @@ class GameScene extends Phaser.Scene {
             repeat: -1
         });
 
+        this.anims.create({
+            key: 'enemy-hit',
+            frames: this.anims.generateFrameNumbers(ENEMY_TEXTURE_KEY, ANIM.HIT),
+            frameRate: 14,
+            repeat: 0
+        });
+
+        this.anims.create({
+            key: 'enemy-death',
+            frames: this.anims.generateFrameNumbers(ENEMY_TEXTURE_KEY, ANIM.DEATH),
+            frameRate: 10,
+            repeat: 0
+        });
+
         // Lifecycle hook to cycle animation sequences gracefully back to idle state
         this.player.on('animationcomplete', () => {
             this.player.play('player-idle');
+        });
+
+        this.enemy.on('animationcomplete', (animation) => {
+            if (animation.key === 'enemy-hit') {
+                this.enemy.play('enemy-idle');
+            }
+
+            if (animation.key === 'enemy-death') {
+                this.enemy.anims.stop();
+                this.enemy.setFrame(ANIM.DEATH.end);
+            }
         });
 
         this.player.play('player-idle');
@@ -324,11 +355,14 @@ class GameScene extends Phaser.Scene {
             .setDepth(7)
             .setScale(1.5);
 
+        arrow.body.setSize(ARROW_HITBOX.width, ARROW_HITBOX.height);
+        arrow.body.setOffset(ARROW_HITBOX.offsetX, ARROW_HITBOX.offsetY);
         arrow.setVelocity(vx, vy);
         arrow.setData('isArrow', true);
 
         // Register localized terrain contact logic
         this.registerGroundImpactCollider(arrow);
+        this.registerEnemyHitOverlap(arrow);
 
         this.spawnParticleTrail(arrow);
 
@@ -350,6 +384,51 @@ class GameScene extends Phaser.Scene {
 
             // Clear configuration data tags so the dynamic frame calculations ignore it
             arrowObj.setData('isArrow', false);
+        });
+    }
+
+    registerEnemyHitOverlap(arrowInstance) {
+        this.physics.add.overlap(arrowInstance, this.enemy, (arrowObj, enemyObj) => {
+            if (!arrowObj.active || !enemyObj.active) return;
+
+            const impactVelocity = new Phaser.Math.Vector2(arrowObj.body.velocity.x, arrowObj.body.velocity.y);
+            const embedDirection = impactVelocity.lengthSq() > 0
+                ? impactVelocity.normalize()
+                : new Phaser.Math.Vector2(1, 0);
+
+            arrowObj.body.setVelocity(0, 0);
+            arrowObj.body.setAngularVelocity(0);
+            arrowObj.body.setAllowGravity(false);
+            arrowObj.body.enable = false;
+            arrowObj.x += embedDirection.x * ARROW_HIT_EMBED_PX;
+            arrowObj.y += embedDirection.y * ARROW_HIT_EMBED_PX;
+            arrowObj.setData('isArrow', false);
+            this.applyDamageToEnemy(10);
+
+            this.time.delayedCall(ARROW_HIT_LINGER_MS, () => {
+                if (arrowObj?.active) arrowObj.destroy();
+            });
+        });
+    }
+
+    applyDamageToEnemy(damageAmount) {
+        if (this.enemyHp <= 0) return;
+
+        this.enemyHp = Math.max(0, this.enemyHp - damageAmount);
+        this.renderHealthBars();
+
+        if (this.enemyHp === 0) {
+            this.enemy.anims.stop();
+            this.enemy.clearTint();
+            this.enemy.play('enemy-death', true);
+            return;
+        }
+
+        this.enemy.anims.stop();
+        this.enemy.play('enemy-hit', true);
+        this.enemy.setTint(0xffd2d2);
+        this.time.delayedCall(120, () => {
+            if (this.enemy?.active) this.enemy.clearTint();
         });
     }
 
