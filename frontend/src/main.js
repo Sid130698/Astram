@@ -29,13 +29,20 @@ class GameScene extends Phaser.Scene {
         this.enemy         = null;
         this.playerHp      = 100;
         this.enemyHp       = 100;
+        this.isMatchOver   = false;
         this.aimGraphics   = null;
         this.hudGraphics   = null;
         this.turnIndicator = null;
+        this.matchOverlay  = null;
+        this.matchResultText = null;
         this.groundGroup   = null;
         this.globalPointer = { x: 0, y: 0 };
         this.pendingVx     = 0;
         this.pendingVy     = 0;
+        this.handleMouseMove = null;
+        this.handleMouseUp = null;
+        this.handleTouchMove = null;
+        this.handleTouchEnd = null;
     }
 
     // ─── LIFECYCLE HOOKS ──────────────────────────────────────────
@@ -130,11 +137,26 @@ class GameScene extends Phaser.Scene {
         this.hudGraphics = this.add.graphics().setDepth(15);
         this.renderHealthBars();
         this.initializeTurnIndicator();
+        this.initializeMatchOverlay();
     }
 
     initializeTurnIndicator() {
         this.turnIndicator = this.add.graphics().setDepth(16);
         this.updateTurnIndicator();
+    }
+
+    initializeMatchOverlay() {
+        this.matchOverlay = this.add.rectangle(400, 300, 800, 600, 0x000000, 0.72)
+            .setDepth(40)
+            .setVisible(false);
+
+        this.matchResultText = this.add.text(400, 300, '', {
+            fontSize: '76px',
+            fontFamily: 'Georgia, serif',
+            color: '#FFE2A8',
+            stroke: '#000000',
+            strokeThickness: 8
+        }).setOrigin(0.5).setDepth(41).setVisible(false);
     }
 
     initializeAnimations() {
@@ -264,21 +286,47 @@ class GameScene extends Phaser.Scene {
         this.input.on('pointerdown', this.handlePointerDown, this);
 
         // Bind global browser mouse event proxies to calculate off-canvas coordinates
-        window.addEventListener('mousemove', (e) => this.processDragMovement(e.clientX, e.clientY));
-        window.addEventListener('mouseup', (e) => this.processDragTermination(e.clientX, e.clientY));
+        this.handleMouseMove = (e) => this.processDragMovement(e.clientX, e.clientY);
+        this.handleMouseUp = (e) => this.processDragTermination(e.clientX, e.clientY);
+        window.addEventListener('mousemove', this.handleMouseMove);
+        window.addEventListener('mouseup', this.handleMouseUp);
 
         // Register tracking rules for cross-platform mobile surface gestures
-        window.addEventListener('touchmove', (e) => {
+        this.handleTouchMove = (e) => {
             e.preventDefault();
             const touch = e.touches[0];
             this.processDragMovement(touch.clientX, touch.clientY);
-        }, { passive: false });
+        };
+        window.addEventListener('touchmove', this.handleTouchMove, { passive: false });
 
-        window.addEventListener('touchend', (e) => {
+        this.handleTouchEnd = (e) => {
             if (!this.isDragging) return;
             const touch = e.changedTouches[0];
             this.processDragTermination(touch.clientX, touch.clientY);
-        });
+        };
+        window.addEventListener('touchend', this.handleTouchEnd);
+    }
+
+    deactivateGlobalInputListeners() {
+        if (this.handleMouseMove) {
+            window.removeEventListener('mousemove', this.handleMouseMove);
+            this.handleMouseMove = null;
+        }
+
+        if (this.handleMouseUp) {
+            window.removeEventListener('mouseup', this.handleMouseUp);
+            this.handleMouseUp = null;
+        }
+
+        if (this.handleTouchMove) {
+            window.removeEventListener('touchmove', this.handleTouchMove);
+            this.handleTouchMove = null;
+        }
+
+        if (this.handleTouchEnd) {
+            window.removeEventListener('touchend', this.handleTouchEnd);
+            this.handleTouchEnd = null;
+        }
     }
 
     synchronizeCoordinates(clientX, clientY) {
@@ -288,7 +336,7 @@ class GameScene extends Phaser.Scene {
     }
 
     handlePointerDown(pointer) {
-        if (!this.isPlayerTurn) return;
+        if (!this.isPlayerTurn || this.isMatchOver) return;
 
         const distance = Phaser.Math.Distance.Between(pointer.x, pointer.y, this.player.x, this.player.y);
         if (distance < 120) {
@@ -299,13 +347,13 @@ class GameScene extends Phaser.Scene {
     }
 
     processDragMovement(clientX, clientY) {
-        if (!this.isDragging) return;
+        if (!this.isDragging || this.isMatchOver) return;
         this.synchronizeCoordinates(clientX, clientY);
         this.calculateAimTrajectory(this.globalPointer);
     }
 
     processDragTermination(clientX, clientY) {
-        if (!this.isDragging) return;
+        if (!this.isDragging || this.isMatchOver) return;
         this.synchronizeCoordinates(clientX, clientY);
         this.isDragging = false;
         this.aimGraphics.clear();
@@ -449,6 +497,7 @@ class GameScene extends Phaser.Scene {
 
         this.enemyHp = Math.max(0, this.enemyHp - damageAmount);
         this.renderHealthBars();
+        this.evaluateMatchEnd();
 
         if (this.enemyHp === 0) {
             this.enemy.anims.stop();
@@ -463,6 +512,40 @@ class GameScene extends Phaser.Scene {
         this.time.delayedCall(120, () => {
             if (this.enemy?.active) this.enemy.clearTint();
         });
+    }
+
+    evaluateMatchEnd() {
+        if (this.isMatchOver) return;
+
+        if (this.enemyHp <= 0) {
+            this.endMatch('VICTORY', '#FFD54A');
+            return;
+        }
+
+        if (this.playerHp <= 0) {
+            this.endMatch('DEFEAT', '#FF8A7A');
+        }
+    }
+
+    endMatch(resultText, textColor) {
+        this.isMatchOver = true;
+        this.isDragging = false;
+        this.isPlayerTurn = false;
+        this.aimGraphics.clear();
+        this.turnIndicator.clear();
+
+        if (this.player) this.player.setAlpha(1);
+        if (this.enemy) this.enemy.setAlpha(1);
+
+        this.input.off('pointerdown', this.handlePointerDown, this);
+        this.deactivateGlobalInputListeners();
+        this.physics.pause();
+
+        this.matchOverlay.setVisible(true);
+        this.matchResultText
+            .setText(resultText)
+            .setColor(textColor)
+            .setVisible(true);
     }
 
     spawnParticleTrail(arrowInstance) {
