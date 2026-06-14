@@ -12,26 +12,35 @@ const ANIM = {
 const GRAVITY        = 600;
 const LAUNCH_MUL = 4;
 const ARROW_DELAY_MS = 180;
+const AGNEYASTRA_FRAME_COUNT = 28;
+const AGNEYASTRA_FRAME_KEY_PREFIX = 'agneyastra-fireball-';
 const GROUND_Y_LEVEL = 530; // The coordinate where the player's feet rest
 const PLAYER_TEXTURE_KEY = 'archer';
 const ENEMY_TEXTURE_KEY = 'archer-enemy';
 const PLAYER_HITBOX = { width: 22, height: 38, offsetX: 21, offsetY: 16 };
 const ENEMY_HITBOX = { width: 22, height: 38, offsetX: 21, offsetY: 16 };
 const ARROW_HITBOX = { width: 14, height: 5, offsetX: 8, offsetY: 8 };
+const AGNEYASTRA_HITBOX = { width: 52, height: 24, offsetX: 68, offsetY: 40 };
 const ARROW_HIT_LINGER_MS = 180;
 const ARROW_HIT_EMBED_PX = 10;
 const COLLISION_WINNER_SPEED_RETENTION = 0.65;
 const PROJECTILE_CONFIG = {
     arrow: {
-        power: 1,
+        label: 'Arrow',
+        damage: 10,
+        power: 10,
+        ammo: null,
         tint: 0xffffff,
         scale: 1.5,
         trailColor: 0xff6600
     },
     agneyastra: {
-        power: 3,
-        tint: 0xff7a1a,
-        scale: 1.7,
+        label: 'Agneyastra',
+        damage: 25,
+        power: 25,
+        ammo: 3,
+        tint: 0xffffff,
+        scale: 0.36,
         trailColor: 0xffa347
     }
 };
@@ -49,12 +58,17 @@ class GameScene extends Phaser.Scene {
         this.aimGraphics   = null;
         this.hudGraphics   = null;
         this.turnIndicator = null;
+        this.selectionButtons = [];
+        this.selectionTitle = null;
         this.matchOverlay  = null;
         this.matchResultText = null;
+        this.damageFlashOverlay = null;
         this.groundGroup   = null;
         this.arrowGroup    = null;
         this.globalPointer = { x: 0, y: 0 };
         this.queuedShots   = { player: null, enemy: null };
+        this.selectedProjectile = { player: 'arrow', enemy: 'arrow' };
+        this.remainingAmmo = { player: { agneyastra: 3 }, enemy: { agneyastra: 3 } };
         this.activeVolleyArrows = 0;
         this.isInputLocked = false;
         this.isVolleyInFlight = false;
@@ -68,6 +82,13 @@ class GameScene extends Phaser.Scene {
     preload() {
         this.load.image('background', '/battleground.png');
         this.load.image('arrow', '/archer-assets/arrow.png');
+        for (let frame = 1; frame <= AGNEYASTRA_FRAME_COUNT; frame++) {
+            const paddedFrame = String(frame).padStart(2, '0');
+            this.load.image(
+                `${AGNEYASTRA_FRAME_KEY_PREFIX}${paddedFrame}`,
+                `/agneyastra/fireball/Effects_Fire_0_${paddedFrame}.png`
+            );
+        }
         this.load.spritesheet(PLAYER_TEXTURE_KEY, '/archer-assets/archer-yellow.png', {
             frameWidth:  64,
             frameHeight: 64
@@ -159,9 +180,48 @@ class GameScene extends Phaser.Scene {
     initializeHud() {
         this.hudGraphics = this.add.graphics().setDepth(15);
         this.renderHealthBars();
+        this.initializeProjectileSelector();
         this.initializeTurnIndicator();
         this.initializeMatchOverlay();
         this.startPlanningRound();
+    }
+
+    initializeProjectileSelector() {
+        this.selectionTitle = this.add.text(400, 118, 'P1 Astra', {
+            fontSize: '16px',
+            fontFamily: 'Georgia, serif',
+            color: '#FFE7B3',
+            stroke: '#000000',
+            strokeThickness: 3
+        }).setOrigin(0.5).setDepth(18);
+
+        this.selectionButtons = [
+            this.createProjectileButton(0, 0, 'arrow'),
+            this.createProjectileButton(0, 0, 'agneyastra')
+        ];
+    }
+
+    createProjectileButton(x, y, projectileType) {
+        const bg = this.add.rectangle(x, y, 44, 44, 0x1a120d, 0.92).setDepth(18);
+        bg.setStrokeStyle(2, 0x6d4c32, 1);
+        bg.setInteractive({ useHandCursor: true });
+        bg.on('pointerdown', () => this.handleProjectileSelection(projectileType));
+
+        const iconTexture = projectileType === 'agneyastra'
+            ? `${AGNEYASTRA_FRAME_KEY_PREFIX}01`
+            : 'arrow';
+        const icon = this.add.image(x, y, iconTexture)
+            .setScale(projectileType === 'agneyastra' ? 0.22 : 0.72)
+            .setDepth(19);
+        icon.setRotation(projectileType === 'agneyastra' ? -0.08 : 0);
+
+        const label = this.add.text(x, y + 33, projectileType === 'agneyastra' ? 'Agni' : 'Arrow', {
+            fontSize: '10px',
+            fontFamily: 'Georgia, serif',
+            color: '#f5e7bf'
+        }).setOrigin(0.5).setDepth(19);
+
+        return { projectileType, bg, icon, label };
     }
 
     initializeTurnIndicator() {
@@ -170,6 +230,10 @@ class GameScene extends Phaser.Scene {
     }
 
     initializeMatchOverlay() {
+        this.damageFlashOverlay = this.add.rectangle(400, 300, 800, 600, 0xff3d1f, 0)
+            .setDepth(39)
+            .setVisible(true);
+
         this.matchOverlay = this.add.rectangle(400, 300, 800, 600, 0x000000, 0.72)
             .setDepth(40)
             .setVisible(false);
@@ -309,6 +373,7 @@ class GameScene extends Phaser.Scene {
             this.turnIndicator.clear();
             if (this.player) this.player.setAlpha(1);
             if (this.enemy) this.enemy.setAlpha(1);
+            this.updateProjectileSelector();
             return;
         }
 
@@ -316,6 +381,7 @@ class GameScene extends Phaser.Scene {
             this.turnIndicator.clear();
             if (this.player) this.player.setAlpha(this.queuedShots.player ? 0.82 : 1);
             if (this.enemy) this.enemy.setAlpha(this.queuedShots.enemy ? 0.82 : 1);
+            this.updateProjectileSelector();
             return;
         }
 
@@ -337,6 +403,8 @@ class GameScene extends Phaser.Scene {
             this.player.setAlpha(this.isPlayerTurn ? 1 : 0.78);
             this.enemy.setAlpha(this.isPlayerTurn ? 0.78 : 1);
         }
+
+        this.updateProjectileSelector();
     }
 
     // ==========================================
@@ -396,7 +464,8 @@ class GameScene extends Phaser.Scene {
         this.globalPointer.y = clientY - bounds.top;
     }
 
-    handlePointerDown(pointer) {
+    handlePointerDown(pointer, currentlyOver) {
+        if (currentlyOver?.length) return;
         if (this.isMatchOver || this.isInputLocked || this.isVolleyInFlight) return;
 
         const activeActor = this.getActiveActor();
@@ -484,6 +553,7 @@ class GameScene extends Phaser.Scene {
 
         const shooterIsPlayer = this.isPlayerTurn;
         const { vx, vy } = this.getLaunchVelocity(shooter, pos);
+        const projectileType = this.getProjectileType(shooterIsPlayer);
 
         if (!this.isLaunchDirectionValid(vx)) {
             shooter.play(this.getAnimationKey(shooterIsPlayer, 'idle'));
@@ -491,8 +561,9 @@ class GameScene extends Phaser.Scene {
         }
 
         const shooterKey = shooterIsPlayer ? 'player' : 'enemy';
-        this.queuedShots[shooterKey] = { vx, vy };
+        this.queuedShots[shooterKey] = { vx, vy, projectileType };
         shooter.play(this.getAnimationKey(shooterIsPlayer, 'idle'));
+        this.consumeProjectileAmmo(shooterKey, projectileType);
 
         if (this.queuedShots.player && this.queuedShots.enemy) {
             this.releaseQueuedShots();
@@ -506,19 +577,22 @@ class GameScene extends Phaser.Scene {
         this.updateTurnIndicator();
     }
 
-    instantiateArrowProjectile(shooterIsPlayer, vx, vy) {
+    instantiateArrowProjectile(shooterIsPlayer, vx, vy, projectileType) {
         const shooter = shooterIsPlayer ? this.player : this.enemy;
-        const projectileType = this.getProjectileType(shooterIsPlayer);
         const projectileConfig = PROJECTILE_CONFIG[projectileType];
+        const textureKey = projectileType === 'agneyastra'
+            ? `${AGNEYASTRA_FRAME_KEY_PREFIX}01`
+            : 'arrow';
         const arrowStartX = shooter.x + (shooterIsPlayer ? 30 : -30);
-        const arrow = this.physics.add.image(arrowStartX, shooter.y - 10, 'arrow')
+        const arrow = this.physics.add.image(arrowStartX, shooter.y - 10, textureKey)
             .setDepth(7)
             .setScale(projectileConfig.scale)
             .setTint(projectileConfig.tint);
         this.arrowGroup.add(arrow);
 
-        arrow.body.setSize(ARROW_HITBOX.width, ARROW_HITBOX.height);
-        arrow.body.setOffset(ARROW_HITBOX.offsetX, ARROW_HITBOX.offsetY);
+        const projectileHitbox = projectileType === 'agneyastra' ? AGNEYASTRA_HITBOX : ARROW_HITBOX;
+        arrow.body.setSize(projectileHitbox.width, projectileHitbox.height);
+        arrow.body.setOffset(projectileHitbox.offsetX, projectileHitbox.offsetY);
         arrow.setData('launchVx', vx);
         arrow.setData('launchVy', vy);
         arrow.setData('hasResolved', false);
@@ -531,6 +605,10 @@ class GameScene extends Phaser.Scene {
         arrow.setRotation(Math.atan2(vy, vx));
         arrow.body.setAllowGravity(true);
         arrow.setVelocity(vx, vy);
+
+        if (projectileType === 'agneyastra') {
+            this.attachAgneyastraAnimation(arrow);
+        }
 
         this.registerGroundImpactCollider(arrow);
         this.registerTargetHitOverlap(arrow, shooterIsPlayer);
@@ -569,19 +647,24 @@ class GameScene extends Phaser.Scene {
         });
 
         this.time.delayedCall(ARROW_DELAY_MS, () => {
-            plannedShots.forEach(({ shooterIsPlayer, vx, vy }) => {
-                this.instantiateArrowProjectile(shooterIsPlayer, vx, vy);
+            plannedShots.forEach(({ shooterIsPlayer, vx, vy, projectileType }) => {
+                this.instantiateArrowProjectile(shooterIsPlayer, vx, vy, projectileType);
             });
         });
     }
 
     registerGroundImpactCollider(arrowInstance) {
         this.physics.add.collider(arrowInstance, this.groundGroup, (arrowObj) => {
+            const impactX = arrowObj.x;
+            const impactY = arrowObj.y;
             arrowObj.body.setVelocity(0, 0);
             arrowObj.body.setAngularVelocity(0);
             arrowObj.body.setAllowGravity(false);
             arrowObj.body.enable = false;
             arrowObj.setData('isArrow', false);
+            if (arrowObj.getData('projectileType') === 'agneyastra') {
+                this.spawnFireExplosion(impactX, impactY);
+            }
             this.resolveArrow(arrowObj, 350, false);
         });
     }
@@ -603,10 +686,17 @@ class GameScene extends Phaser.Scene {
             arrowObj.x += embedDirection.x * ARROW_HIT_EMBED_PX;
             arrowObj.y += embedDirection.y * ARROW_HIT_EMBED_PX;
             arrowObj.setData('isArrow', false);
+            const projectileType = arrowObj.getData('projectileType');
+            const damage = PROJECTILE_CONFIG[projectileType]?.damage ?? 10;
+            if (projectileType === 'agneyastra') {
+                this.spawnFireExplosion(arrowObj.x, arrowObj.y);
+                this.flashDamageScreen();
+            }
+
             if (shooterIsPlayer) {
-                this.applyDamageToEnemy(10);
+                this.applyDamageToEnemy(damage);
             } else {
-                this.applyDamageToPlayer(10);
+                this.applyDamageToPlayer(damage);
             }
 
             this.resolveArrow(arrowObj, ARROW_HIT_LINGER_MS, false);
@@ -754,9 +844,15 @@ class GameScene extends Phaser.Scene {
                 if (!arrowInstance.active || !arrowInstance.body || arrowInstance.body.enable === false) return;
                 if (!arrowInstance.getData('isLaunched')) return;
 
+                const projectileType = arrowInstance.getData('projectileType');
                 const trail = this.add.graphics().setDepth(6);
-                trail.fillStyle(arrowInstance.getData('trailColor') ?? 0xFF6600, 0.35);
-                trail.fillCircle(arrowInstance.x, arrowInstance.y, 5);
+                trail.fillStyle(arrowInstance.getData('trailColor') ?? 0xFF6600, projectileType === 'agneyastra' ? 0.5 : 0.35);
+                trail.fillCircle(arrowInstance.x, arrowInstance.y, projectileType === 'agneyastra' ? 7 : 5);
+
+                if (projectileType === 'agneyastra') {
+                    trail.fillStyle(0xfff0b3, 0.55);
+                    trail.fillCircle(arrowInstance.x, arrowInstance.y, 3.5);
+                }
 
                 this.tweens.add({
                     targets: trail,
@@ -766,6 +862,19 @@ class GameScene extends Phaser.Scene {
                     duration: 250,
                     onComplete: () => trail.destroy()
                 });
+            }
+        });
+    }
+
+    attachAgneyastraAnimation(projectile) {
+        let frameIndex = 1;
+        this.time.addEvent({
+            delay: 45,
+            loop: true,
+            callback: () => {
+                if (!projectile?.active) return;
+                frameIndex = frameIndex % AGNEYASTRA_FRAME_COUNT + 1;
+                projectile.setTexture(`${AGNEYASTRA_FRAME_KEY_PREFIX}${String(frameIndex).padStart(2, '0')}`);
             }
         });
     }
@@ -783,11 +892,70 @@ class GameScene extends Phaser.Scene {
     }
 
     getProjectileType(shooterIsPlayer) {
-        return shooterIsPlayer ? 'arrow' : 'agneyastra';
+        return shooterIsPlayer ? this.selectedProjectile.player : this.selectedProjectile.enemy;
     }
 
     hasShotQueuedForCurrentTurn() {
         return this.isPlayerTurn ? Boolean(this.queuedShots.player) : Boolean(this.queuedShots.enemy);
+    }
+
+    handleProjectileSelection(projectileType) {
+        if (this.isMatchOver || this.isVolleyInFlight) return;
+
+        const selectionKey = this.isPlayerTurn ? 'player' : 'enemy';
+        if (this.queuedShots[selectionKey]) return;
+        if (!this.canSelectProjectile(selectionKey, projectileType)) return;
+
+        this.selectedProjectile[selectionKey] = projectileType;
+        this.updateProjectileSelector();
+    }
+
+    updateProjectileSelector() {
+        if (!this.selectionTitle || this.selectionButtons.length === 0) return;
+
+        const selectionKey = this.isPlayerTurn ? 'player' : 'enemy';
+        const selectedType = this.selectedProjectile[selectionKey];
+        const canChangeSelection = !this.isMatchOver && !this.isVolleyInFlight && !this.queuedShots[selectionKey];
+        const isVisible = canChangeSelection;
+        const layout = this.isPlayerTurn
+            ? { titleX: 114, titleY: 58, startX: 88, startY: 94 }
+            : { titleX: 686, titleY: 58, startX: 660, startY: 94 };
+
+        this.selectionTitle
+            .setPosition(layout.titleX, layout.titleY)
+            .setText('Astra')
+            .setAlpha(isVisible ? 1 : 0)
+            .setVisible(isVisible);
+
+        this.selectionButtons.forEach(({ projectileType, bg, icon, label }, index) => {
+            const isSelected = projectileType === selectedType;
+            const palette = PROJECTILE_CONFIG[projectileType];
+            const x = layout.startX + index * 52;
+            const y = layout.startY;
+            const isAvailable = this.canSelectProjectile(selectionKey, projectileType);
+            const alpha = isVisible ? (isAvailable ? 1 : 0.4) : 0;
+            const ammoText = this.getProjectileAmmoText(selectionKey, projectileType);
+
+            bg.setPosition(x, y);
+            icon.setPosition(x, y);
+            label.setPosition(x, y + 33);
+
+            bg.setFillStyle(isSelected ? palette.tint : 0x1a120d, 0.92);
+            bg.setStrokeStyle(2, isSelected ? 0xffe2ad : 0x6d4c32, 1);
+            bg.setAlpha(alpha);
+            bg.setVisible(isVisible);
+
+            icon.setTint(isSelected ? 0x201006 : palette.tint);
+            icon.setAlpha(alpha);
+            icon.setVisible(isVisible);
+
+            label.setText(projectileType === 'agneyastra' ? `Agni ${ammoText}` : `Arrow ${ammoText}`);
+            label.setColor(isSelected ? '#201006' : '#f5e7bf');
+            label.setAlpha(alpha);
+            label.setVisible(isVisible);
+
+            bg.input.enabled = canChangeSelection && isAvailable;
+        });
     }
 
     getLaunchVelocity(actor, pos) {
@@ -806,6 +974,32 @@ class GameScene extends Phaser.Scene {
         return `${actorPrefix}-${state}`;
     }
 
+    canSelectProjectile(selectionKey, projectileType) {
+        const ammoLimit = PROJECTILE_CONFIG[projectileType]?.ammo;
+        if (ammoLimit == null) return true;
+        return (this.remainingAmmo[selectionKey]?.[projectileType] ?? 0) > 0;
+    }
+
+    consumeProjectileAmmo(selectionKey, projectileType) {
+        const ammoLimit = PROJECTILE_CONFIG[projectileType]?.ammo;
+        if (ammoLimit == null) return;
+
+        this.remainingAmmo[selectionKey][projectileType] = Math.max(
+            0,
+            (this.remainingAmmo[selectionKey]?.[projectileType] ?? 0) - 1
+        );
+
+        if (!this.canSelectProjectile(selectionKey, projectileType)) {
+            this.selectedProjectile[selectionKey] = 'arrow';
+        }
+    }
+
+    getProjectileAmmoText(selectionKey, projectileType) {
+        const ammoLimit = PROJECTILE_CONFIG[projectileType]?.ammo;
+        if (ammoLimit == null) return '∞';
+        return `${this.remainingAmmo[selectionKey]?.[projectileType] ?? 0}`;
+    }
+
     startPlanningRound() {
         if (this.isMatchOver) return;
 
@@ -815,6 +1009,40 @@ class GameScene extends Phaser.Scene {
         this.isVolleyInFlight = false;
         this.isDragging = false;
         this.updateTurnIndicator();
+    }
+
+    flashDamageScreen() {
+        if (!this.damageFlashOverlay) return;
+
+        this.tweens.killTweensOf(this.damageFlashOverlay);
+        this.damageFlashOverlay.setAlpha(0.45);
+        this.tweens.add({
+            targets: this.damageFlashOverlay,
+            alpha: 0,
+            duration: 220,
+            ease: 'Quad.easeOut'
+        });
+    }
+
+    spawnFireExplosion(x, y) {
+        const core = this.add.circle(x, y, 12, 0xfff0b3, 0.95).setDepth(26);
+        const flame = this.add.circle(x, y, 20, 0xff6b1a, 0.65).setDepth(25);
+        const shock = this.add.circle(x, y, 26, 0xffb347, 0.28).setDepth(24);
+        shock.setStrokeStyle(4, 0xffd27a, 0.8);
+
+        this.tweens.add({
+            targets: [core, flame, shock],
+            scaleX: 2.7,
+            scaleY: 2.7,
+            alpha: 0,
+            duration: 320,
+            ease: 'Cubic.easeOut',
+            onComplete: () => {
+                core.destroy();
+                flame.destroy();
+                shock.destroy();
+            }
+        });
     }
 
     disableProjectile(arrow) {
