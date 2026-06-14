@@ -37,8 +37,9 @@ class GameScene extends Phaser.Scene {
         this.matchOverlay  = null;
         this.matchResultText = null;
         this.groundGroup   = null;
+        this.arrowGroup    = null;
         this.globalPointer = { x: 0, y: 0 };
-        this.frozenArrows  = [];
+        this.queuedShots   = { player: null, enemy: null };
         this.activeVolleyArrows = 0;
         this.isInputLocked = false;
         this.isVolleyInFlight = false;
@@ -131,6 +132,8 @@ class GameScene extends Phaser.Scene {
     initializePhysicsBoundaries() {
         // Initialize dynamic aiming vector overlay graphics context
         this.aimGraphics = this.add.graphics().setDepth(20);
+        this.arrowGroup = this.physics.add.group();
+        this.physics.add.overlap(this.arrowGroup, this.arrowGroup, this.handleArrowMidAirCollision, null, this);
 
         // Programmatically generate our localized lower landing plane boundary
         this.groundGroup = this.physics.add.staticGroup();
@@ -296,8 +299,8 @@ class GameScene extends Phaser.Scene {
 
         if (this.hasShotQueuedForCurrentTurn()) {
             this.turnIndicator.clear();
-            if (this.player) this.player.setAlpha(this.hasQueuedShotForActor(true) ? 0.82 : 1);
-            if (this.enemy) this.enemy.setAlpha(this.hasQueuedShotForActor(false) ? 0.82 : 1);
+            if (this.player) this.player.setAlpha(this.queuedShots.player ? 0.82 : 1);
+            if (this.enemy) this.enemy.setAlpha(this.queuedShots.enemy ? 0.82 : 1);
             return;
         }
 
@@ -472,20 +475,29 @@ class GameScene extends Phaser.Scene {
             return;
         }
 
-        this.isInputLocked = true;
-        shooter.play(this.getAnimationKey(shooterIsPlayer, 'release'));
+        const shooterKey = shooterIsPlayer ? 'player' : 'enemy';
+        this.queuedShots[shooterKey] = { vx, vy };
+        shooter.play(this.getAnimationKey(shooterIsPlayer, 'idle'));
 
-        this.time.delayedCall(ARROW_DELAY_MS, () => {
-            this.queueFrozenArrow(shooterIsPlayer, vx, vy);
-        });
+        if (this.queuedShots.player && this.queuedShots.enemy) {
+            this.releaseQueuedShots();
+            return;
+        }
+
+        if (shooterIsPlayer) {
+            this.isPlayerTurn = false;
+        }
+
+        this.updateTurnIndicator();
     }
 
-    instantiateArrowProjectile(shooterIsPlayer, vx, vy, freezeOnSpawn = false) {
+    instantiateArrowProjectile(shooterIsPlayer, vx, vy) {
         const shooter = shooterIsPlayer ? this.player : this.enemy;
         const arrowStartX = shooter.x + (shooterIsPlayer ? 30 : -30);
         const arrow = this.physics.add.image(arrowStartX, shooter.y - 10, 'arrow')
             .setDepth(7)
             .setScale(1.5);
+        this.arrowGroup.add(arrow);
 
         arrow.body.setSize(ARROW_HITBOX.width, ARROW_HITBOX.height);
         arrow.body.setOffset(ARROW_HITBOX.offsetX, ARROW_HITBOX.offsetY);
@@ -493,46 +505,32 @@ class GameScene extends Phaser.Scene {
         arrow.setData('launchVy', vy);
         arrow.setData('hasResolved', false);
         arrow.setData('isArrow', true);
-        arrow.setData('isLaunched', !freezeOnSpawn);
+        arrow.setData('isLaunched', true);
         arrow.setData('ownerIsPlayer', shooterIsPlayer);
         arrow.setRotation(Math.atan2(vy, vx));
-
-        if (freezeOnSpawn) {
-            arrow.body.setAllowGravity(false);
-            arrow.setVelocity(0, 0);
-        } else {
-            arrow.body.setAllowGravity(true);
-            arrow.setVelocity(vx, vy);
-        }
+        arrow.body.setAllowGravity(true);
+        arrow.setVelocity(vx, vy);
 
         this.registerGroundImpactCollider(arrow);
         this.registerTargetHitOverlap(arrow, shooterIsPlayer);
         this.spawnParticleTrail(arrow);
 
+        this.time.delayedCall(3500, () => {
+            if (arrow?.active) this.resolveArrow(arrow, 0, true);
+        });
+
         return arrow;
-    }
-
-    queueFrozenArrow(shooterIsPlayer, vx, vy) {
-        const arrow = this.instantiateArrowProjectile(shooterIsPlayer, vx, vy, true);
-        this.frozenArrows.push(arrow);
-        this.isDragging = false;
-        this.isInputLocked = false;
-
-        if (this.frozenArrows.length === 1) {
-            this.isPlayerTurn = false;
-            this.updateTurnIndicator();
-            return;
-        }
-
-        this.releaseQueuedShots();
     }
 
     releaseQueuedShots() {
         if (this.isVolleyInFlight || this.isMatchOver) return;
 
-        const volleyArrows = this.frozenArrows.filter((arrow) => arrow?.active && arrow.body);
+        const plannedShots = [
+            this.queuedShots.player ? { shooterIsPlayer: true, ...this.queuedShots.player } : null,
+            this.queuedShots.enemy ? { shooterIsPlayer: false, ...this.queuedShots.enemy } : null
+        ].filter(Boolean);
 
-        if (volleyArrows.length === 0) {
+        if (plannedShots.length === 0) {
             this.startPlanningRound();
             return;
         }
@@ -540,33 +538,19 @@ class GameScene extends Phaser.Scene {
         this.isVolleyInFlight = true;
         this.isInputLocked = true;
         this.isDragging = false;
-        this.activeVolleyArrows = volleyArrows.length;
+        this.activeVolleyArrows = plannedShots.length;
         this.aimGraphics.clear();
         this.updateTurnIndicator();
 
-        volleyArrows.forEach((arrow) => {
-            const shooterIsPlayer = arrow.getData('ownerIsPlayer');
+        plannedShots.forEach(({ shooterIsPlayer }) => {
             const shooter = shooterIsPlayer ? this.player : this.enemy;
             shooter.play(this.getAnimationKey(shooterIsPlayer, 'release'));
         });
 
         this.time.delayedCall(ARROW_DELAY_MS, () => {
-            volleyArrows.forEach((arrow) => {
-                if (!arrow?.active || !arrow.body) {
-                    this.markArrowResolved();
-                    return;
-                }
-
-                arrow.setData('isLaunched', true);
-                arrow.body.setAllowGravity(true);
-                arrow.setVelocity(arrow.getData('launchVx'), arrow.getData('launchVy'));
-
-                this.time.delayedCall(3500, () => {
-                    if (arrow?.active) this.resolveArrow(arrow, 0, true);
-                });
+            plannedShots.forEach(({ shooterIsPlayer, vx, vy }) => {
+                this.instantiateArrowProjectile(shooterIsPlayer, vx, vy);
             });
-
-            this.frozenArrows = [];
         });
     }
 
@@ -606,6 +590,29 @@ class GameScene extends Phaser.Scene {
 
             this.resolveArrow(arrowObj, ARROW_HIT_LINGER_MS, false);
         });
+    }
+
+    handleArrowMidAirCollision(firstArrow, secondArrow) {
+        if (firstArrow === secondArrow) return;
+        if (!firstArrow.active || !secondArrow.active) return;
+        if (firstArrow.getData('hasResolved') || secondArrow.getData('hasResolved')) return;
+        if (!firstArrow.getData('isLaunched') || !secondArrow.getData('isLaunched')) return;
+
+        const impactX = (firstArrow.x + secondArrow.x) / 2;
+        const impactY = (firstArrow.y + secondArrow.y) / 2;
+
+        [firstArrow, secondArrow].forEach((arrow) => {
+            arrow.body.setVelocity(0, 0);
+            arrow.body.setAngularVelocity(0);
+            arrow.body.setAllowGravity(false);
+            arrow.body.enable = false;
+            arrow.setData('isArrow', false);
+            arrow.setData('isLaunched', false);
+        });
+
+        this.spawnImpactFlash(impactX, impactY);
+        this.resolveArrow(firstArrow, 0, true);
+        this.resolveArrow(secondArrow, 0, true);
     }
 
     applyDamageToEnemy(damageAmount) {
@@ -687,6 +694,25 @@ class GameScene extends Phaser.Scene {
             .setVisible(true);
     }
 
+    spawnImpactFlash(x, y) {
+        const flash = this.add.circle(x, y, 8, 0xfff2b3, 0.95).setDepth(25);
+        const ring = this.add.circle(x, y, 12, 0xff8a33, 0.4).setDepth(24);
+        ring.setStrokeStyle(3, 0xffd27a, 0.85);
+
+        this.tweens.add({
+            targets: [flash, ring],
+            scaleX: 2.1,
+            scaleY: 2.1,
+            alpha: 0,
+            duration: 140,
+            ease: 'Quad.easeOut',
+            onComplete: () => {
+                flash.destroy();
+                ring.destroy();
+            }
+        });
+    }
+
     spawnParticleTrail(arrowInstance) {
         this.time.addEvent({
             delay: 18,
@@ -724,15 +750,7 @@ class GameScene extends Phaser.Scene {
     }
 
     hasShotQueuedForCurrentTurn() {
-        return this.hasQueuedShotForActor(this.isPlayerTurn);
-    }
-
-    hasQueuedShotForActor(actorIsPlayer) {
-        return this.frozenArrows.some((arrow) => (
-            arrow?.active &&
-            arrow.getData('ownerIsPlayer') === actorIsPlayer &&
-            !arrow.getData('hasResolved')
-        ));
+        return this.isPlayerTurn ? Boolean(this.queuedShots.player) : Boolean(this.queuedShots.enemy);
     }
 
     getLaunchVelocity(actor, pos) {
@@ -754,7 +772,7 @@ class GameScene extends Phaser.Scene {
     startPlanningRound() {
         if (this.isMatchOver) return;
 
-        this.frozenArrows = [];
+        this.queuedShots = { player: null, enemy: null };
         this.isPlayerTurn = true;
         this.isInputLocked = false;
         this.isVolleyInFlight = false;
