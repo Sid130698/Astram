@@ -15,7 +15,8 @@ const ARROW_DELAY_MS = 180;
 const GROUND_Y_LEVEL = 530; // The coordinate where the player's feet rest
 const PLAYER_TEXTURE_KEY = 'archer';
 const ENEMY_TEXTURE_KEY = 'archer-enemy';
-const ENEMY_HITBOX = { width: 28, height: 44, offsetX: 18, offsetY: 12 };
+const PLAYER_HITBOX = { width: 22, height: 38, offsetX: 21, offsetY: 16 };
+const ENEMY_HITBOX = { width: 22, height: 38, offsetX: 21, offsetY: 16 };
 const ARROW_HITBOX = { width: 14, height: 5, offsetX: 8, offsetY: 8 };
 const ARROW_HIT_LINGER_MS = 180;
 const ARROW_HIT_EMBED_PX = 10;
@@ -37,8 +38,10 @@ class GameScene extends Phaser.Scene {
         this.matchResultText = null;
         this.groundGroup   = null;
         this.globalPointer = { x: 0, y: 0 };
-        this.pendingVx     = 0;
-        this.pendingVy     = 0;
+        this.frozenArrows  = [];
+        this.activeVolleyArrows = 0;
+        this.isInputLocked = false;
+        this.isVolleyInFlight = false;
         this.handleMouseMove = null;
         this.handleMouseUp = null;
         this.handleTouchMove = null;
@@ -112,6 +115,8 @@ class GameScene extends Phaser.Scene {
             .setDepth(5);
         this.player.body.setAllowGravity(false);
         this.player.setCollideWorldBounds(true);
+        this.player.body.setSize(PLAYER_HITBOX.width, PLAYER_HITBOX.height);
+        this.player.body.setOffset(PLAYER_HITBOX.offsetX, PLAYER_HITBOX.offsetY);
 
         this.enemy = this.physics.add.sprite(670, 460, ENEMY_TEXTURE_KEY)
             .setScale(2.2)
@@ -138,6 +143,7 @@ class GameScene extends Phaser.Scene {
         this.renderHealthBars();
         this.initializeTurnIndicator();
         this.initializeMatchOverlay();
+        this.startPlanningRound();
     }
 
     initializeTurnIndicator() {
@@ -189,6 +195,13 @@ class GameScene extends Phaser.Scene {
         });
 
         this.anims.create({
+            key: 'player-death',
+            frames: this.anims.generateFrameNumbers(PLAYER_TEXTURE_KEY, ANIM.DEATH),
+            frameRate: 10,
+            repeat: 0
+        });
+
+        this.anims.create({
             key: 'enemy-idle',
             frames: this.anims.generateFrameNumbers(ENEMY_TEXTURE_KEY, ANIM.IDLE),
             frameRate: 10,
@@ -203,26 +216,42 @@ class GameScene extends Phaser.Scene {
         });
 
         this.anims.create({
+            key: 'enemy-release',
+            frames: this.anims.generateFrameNumbers(ENEMY_TEXTURE_KEY, ANIM.RELEASE),
+            frameRate: 14,
+            repeat: 0
+        });
+
+        this.anims.create({
             key: 'enemy-death',
             frames: this.anims.generateFrameNumbers(ENEMY_TEXTURE_KEY, ANIM.DEATH),
             frameRate: 10,
             repeat: 0
         });
 
-        // Lifecycle hook to cycle animation sequences gracefully back to idle state
-        this.player.on('animationcomplete', () => {
+        this.player.on('animationcomplete', (animation) => {
+            if (animation.key === 'player-death') {
+                this.player.anims.stop();
+                this.player.setFrame(ANIM.DEATH.end);
+                return;
+            }
+
             this.player.play('player-idle');
         });
 
         this.enemy.on('animationcomplete', (animation) => {
             if (animation.key === 'enemy-hit') {
                 this.enemy.play('enemy-idle');
+                return;
             }
 
             if (animation.key === 'enemy-death') {
                 this.enemy.anims.stop();
                 this.enemy.setFrame(ANIM.DEATH.end);
+                return;
             }
+
+            this.enemy.play('enemy-idle');
         });
 
         this.player.play('player-idle');
@@ -258,7 +287,21 @@ class GameScene extends Phaser.Scene {
     updateTurnIndicator() {
         if (!this.turnIndicator) return;
 
-        const activeActor = this.isPlayerTurn ? this.player : this.enemy;
+        if (this.isVolleyInFlight) {
+            this.turnIndicator.clear();
+            if (this.player) this.player.setAlpha(1);
+            if (this.enemy) this.enemy.setAlpha(1);
+            return;
+        }
+
+        if (this.hasShotQueuedForCurrentTurn()) {
+            this.turnIndicator.clear();
+            if (this.player) this.player.setAlpha(this.hasQueuedShotForActor(true) ? 0.82 : 1);
+            if (this.enemy) this.enemy.setAlpha(this.hasQueuedShotForActor(false) ? 0.82 : 1);
+            return;
+        }
+
+        const activeActor = this.getActiveActor();
         if (!activeActor) return;
 
         this.turnIndicator.clear();
@@ -336,13 +379,16 @@ class GameScene extends Phaser.Scene {
     }
 
     handlePointerDown(pointer) {
-        if (!this.isPlayerTurn || this.isMatchOver) return;
+        if (this.isMatchOver || this.isInputLocked || this.isVolleyInFlight) return;
 
-        const distance = Phaser.Math.Distance.Between(pointer.x, pointer.y, this.player.x, this.player.y);
+        const activeActor = this.getActiveActor();
+        if (!activeActor || this.hasShotQueuedForCurrentTurn()) return;
+
+        const distance = Phaser.Math.Distance.Between(pointer.x, pointer.y, activeActor.x, activeActor.y);
         if (distance < 120) {
             this.isDragging = true;
-            this.player.anims.stop();
-            this.player.setFrame(17); // Snaps immediately to structural peak draw posture frame
+            activeActor.anims.stop();
+            activeActor.setFrame(17);
         }
     }
 
@@ -367,14 +413,16 @@ class GameScene extends Phaser.Scene {
     calculateAimTrajectory(pos) {
         this.aimGraphics.clear();
 
-        const vx = (this.player.x - pos.x) * LAUNCH_MUL;
-        const vy = (this.player.y - pos.y) * LAUNCH_MUL;
+        const activeActor = this.getActiveActor();
+        if (!activeActor) return;
 
-        if (vx < 0) return; // Prevent inverse firing mechanics toward the left edge boundary
+        const { vx, vy } = this.getLaunchVelocity(activeActor, pos);
+
+        if (!this.isLaunchDirectionValid(vx)) return;
 
         const dt = 0.025;
-        let projectX = this.player.x;
-        let projectY = this.player.y;
+        let projectX = activeActor.x;
+        let projectY = activeActor.y;
         let runningVx = vx;
         let runningVy = vy;
 
@@ -396,16 +444,16 @@ class GameScene extends Phaser.Scene {
             }
         }
 
-        this.renderTensionRing(pos);
+        this.renderTensionRing(activeActor, pos);
     }
 
-    renderTensionRing(pos) {
-        const dragDistance = Phaser.Math.Distance.Between(this.player.x, this.player.y, pos.x, pos.y);
+    renderTensionRing(actor, pos) {
+        const dragDistance = Phaser.Math.Distance.Between(actor.x, actor.y, pos.x, pos.y);
         const powerRatio = Math.min(dragDistance / 200, 1);
         const ringColor = powerRatio < 0.4 ? 0x00FF88 : powerRatio < 0.75 ? 0xFFAA00 : 0xFF2200;
 
         this.aimGraphics.lineStyle(2, ringColor, 0.85);
-        this.aimGraphics.strokeCircle(this.player.x, this.player.y, 28 + powerRatio * 35);
+        this.aimGraphics.strokeCircle(actor.x, actor.y, 28 + powerRatio * 35);
     }
 
     // ==========================================
@@ -413,69 +461,135 @@ class GameScene extends Phaser.Scene {
     // ==========================================
 
     executeLaunchSequence(pos) {
-        const vx = (this.player.x - pos.x) * LAUNCH_MUL;
-        const vy = (this.player.y - pos.y) * LAUNCH_MUL;
+        const shooter = this.getActiveActor();
+        if (!shooter) return;
 
-        if (vx < 20) {
-            this.player.play('player-idle');
+        const shooterIsPlayer = this.isPlayerTurn;
+        const { vx, vy } = this.getLaunchVelocity(shooter, pos);
+
+        if (!this.isLaunchDirectionValid(vx)) {
+            shooter.play(this.getAnimationKey(shooterIsPlayer, 'idle'));
             return;
         }
 
-        this.pendingVx = vx;
-        this.pendingVy = vy;
-        this.player.play('player-release');
+        this.isInputLocked = true;
+        shooter.play(this.getAnimationKey(shooterIsPlayer, 'release'));
 
-        // Delay arrow generation to perfectly sync up with animation timing frame loops
         this.time.delayedCall(ARROW_DELAY_MS, () => {
-            this.instantiateArrowProjectile(this.pendingVx, this.pendingVy);
+            this.queueFrozenArrow(shooterIsPlayer, vx, vy);
         });
     }
 
-    instantiateArrowProjectile(vx, vy) {
-        const arrow = this.physics.add.image(this.player.x + 30, this.player.y - 10, 'arrow')
+    instantiateArrowProjectile(shooterIsPlayer, vx, vy, freezeOnSpawn = false) {
+        const shooter = shooterIsPlayer ? this.player : this.enemy;
+        const arrowStartX = shooter.x + (shooterIsPlayer ? 30 : -30);
+        const arrow = this.physics.add.image(arrowStartX, shooter.y - 10, 'arrow')
             .setDepth(7)
             .setScale(1.5);
 
         arrow.body.setSize(ARROW_HITBOX.width, ARROW_HITBOX.height);
         arrow.body.setOffset(ARROW_HITBOX.offsetX, ARROW_HITBOX.offsetY);
-        arrow.setVelocity(vx, vy);
+        arrow.setData('launchVx', vx);
+        arrow.setData('launchVy', vy);
+        arrow.setData('hasResolved', false);
         arrow.setData('isArrow', true);
+        arrow.setData('isLaunched', !freezeOnSpawn);
+        arrow.setData('ownerIsPlayer', shooterIsPlayer);
+        arrow.setRotation(Math.atan2(vy, vx));
 
-        // Register localized terrain contact logic
+        if (freezeOnSpawn) {
+            arrow.body.setAllowGravity(false);
+            arrow.setVelocity(0, 0);
+        } else {
+            arrow.body.setAllowGravity(true);
+            arrow.setVelocity(vx, vy);
+        }
+
         this.registerGroundImpactCollider(arrow);
-        this.registerEnemyHitOverlap(arrow);
-
+        this.registerTargetHitOverlap(arrow, shooterIsPlayer);
         this.spawnParticleTrail(arrow);
 
-        // Automatic engine trash-collector fallback cleanup (3.5 seconds boundary max)
-        this.time.delayedCall(3500, () => {
-            if (arrow && arrow.active) arrow.destroy();
+        return arrow;
+    }
+
+    queueFrozenArrow(shooterIsPlayer, vx, vy) {
+        const arrow = this.instantiateArrowProjectile(shooterIsPlayer, vx, vy, true);
+        this.frozenArrows.push(arrow);
+        this.isDragging = false;
+        this.isInputLocked = false;
+
+        if (this.frozenArrows.length === 1) {
+            this.isPlayerTurn = false;
+            this.updateTurnIndicator();
+            return;
+        }
+
+        this.releaseQueuedShots();
+    }
+
+    releaseQueuedShots() {
+        if (this.isVolleyInFlight || this.isMatchOver) return;
+
+        const volleyArrows = this.frozenArrows.filter((arrow) => arrow?.active && arrow.body);
+
+        if (volleyArrows.length === 0) {
+            this.startPlanningRound();
+            return;
+        }
+
+        this.isVolleyInFlight = true;
+        this.isInputLocked = true;
+        this.isDragging = false;
+        this.activeVolleyArrows = volleyArrows.length;
+        this.aimGraphics.clear();
+        this.updateTurnIndicator();
+
+        volleyArrows.forEach((arrow) => {
+            const shooterIsPlayer = arrow.getData('ownerIsPlayer');
+            const shooter = shooterIsPlayer ? this.player : this.enemy;
+            shooter.play(this.getAnimationKey(shooterIsPlayer, 'release'));
+        });
+
+        this.time.delayedCall(ARROW_DELAY_MS, () => {
+            volleyArrows.forEach((arrow) => {
+                if (!arrow?.active || !arrow.body) {
+                    this.markArrowResolved();
+                    return;
+                }
+
+                arrow.setData('isLaunched', true);
+                arrow.body.setAllowGravity(true);
+                arrow.setVelocity(arrow.getData('launchVx'), arrow.getData('launchVy'));
+
+                this.time.delayedCall(3500, () => {
+                    if (arrow?.active) this.resolveArrow(arrow, 0, true);
+                });
+            });
+
+            this.frozenArrows = [];
         });
     }
 
     registerGroundImpactCollider(arrowInstance) {
         this.physics.add.collider(arrowInstance, this.groundGroup, (arrowObj) => {
-            // Freeze positions instantaneously on contact
             arrowObj.body.setVelocity(0, 0);
             arrowObj.body.setAngularVelocity(0);
             arrowObj.body.setAllowGravity(false);
-
-            // Terminate engine computational transformations on this specific body container
             arrowObj.body.enable = false;
-
-            // Clear configuration data tags so the dynamic frame calculations ignore it
             arrowObj.setData('isArrow', false);
+            this.resolveArrow(arrowObj, 350, false);
         });
     }
 
-    registerEnemyHitOverlap(arrowInstance) {
-        this.physics.add.overlap(arrowInstance, this.enemy, (arrowObj, enemyObj) => {
-            if (!arrowObj.active || !enemyObj.active) return;
+    registerTargetHitOverlap(arrowInstance, shooterIsPlayer) {
+        const target = shooterIsPlayer ? this.enemy : this.player;
+        this.physics.add.overlap(arrowInstance, target, (arrowObj, targetObj) => {
+            if (!arrowObj.active || !targetObj.active) return;
 
             const impactVelocity = new Phaser.Math.Vector2(arrowObj.body.velocity.x, arrowObj.body.velocity.y);
             const embedDirection = impactVelocity.lengthSq() > 0
                 ? impactVelocity.normalize()
-                : new Phaser.Math.Vector2(1, 0);
+                : new Phaser.Math.Vector2(shooterIsPlayer ? 1 : -1, 0);
 
             arrowObj.body.setVelocity(0, 0);
             arrowObj.body.setAngularVelocity(0);
@@ -484,11 +598,13 @@ class GameScene extends Phaser.Scene {
             arrowObj.x += embedDirection.x * ARROW_HIT_EMBED_PX;
             arrowObj.y += embedDirection.y * ARROW_HIT_EMBED_PX;
             arrowObj.setData('isArrow', false);
-            this.applyDamageToEnemy(10);
+            if (shooterIsPlayer) {
+                this.applyDamageToEnemy(10);
+            } else {
+                this.applyDamageToPlayer(10);
+            }
 
-            this.time.delayedCall(ARROW_HIT_LINGER_MS, () => {
-                if (arrowObj?.active) arrowObj.destroy();
-            });
+            this.resolveArrow(arrowObj, ARROW_HIT_LINGER_MS, false);
         });
     }
 
@@ -514,6 +630,28 @@ class GameScene extends Phaser.Scene {
         });
     }
 
+    applyDamageToPlayer(damageAmount) {
+        if (this.playerHp <= 0) return;
+
+        this.playerHp = Math.max(0, this.playerHp - damageAmount);
+        this.renderHealthBars();
+        this.evaluateMatchEnd();
+
+        if (this.playerHp === 0) {
+            this.player.anims.stop();
+            this.player.clearTint();
+            this.player.play('player-death', true);
+            return;
+        }
+
+        this.player.anims.stop();
+        this.player.play('player-hit', true);
+        this.player.setTint(0xffd2d2);
+        this.time.delayedCall(120, () => {
+            if (this.player?.active) this.player.clearTint();
+        });
+    }
+
     evaluateMatchEnd() {
         if (this.isMatchOver) return;
 
@@ -530,7 +668,8 @@ class GameScene extends Phaser.Scene {
     endMatch(resultText, textColor) {
         this.isMatchOver = true;
         this.isDragging = false;
-        this.isPlayerTurn = false;
+        this.isInputLocked = true;
+        this.isVolleyInFlight = false;
         this.aimGraphics.clear();
         this.turnIndicator.clear();
 
@@ -554,6 +693,7 @@ class GameScene extends Phaser.Scene {
             repeat: 25,
             callback: () => {
                 if (!arrowInstance.active || !arrowInstance.body || arrowInstance.body.enable === false) return;
+                if (!arrowInstance.getData('isLaunched')) return;
 
                 const trail = this.add.graphics().setDepth(6);
                 trail.fillStyle(0xFF6600, 0.35);
@@ -576,6 +716,77 @@ class GameScene extends Phaser.Scene {
             if (child.getData?.('isArrow') && child.body) {
                 child.setRotation(Math.atan2(child.body.velocity.y, child.body.velocity.x));
             }
+        });
+    }
+
+    getActiveActor() {
+        return this.isPlayerTurn ? this.player : this.enemy;
+    }
+
+    hasShotQueuedForCurrentTurn() {
+        return this.hasQueuedShotForActor(this.isPlayerTurn);
+    }
+
+    hasQueuedShotForActor(actorIsPlayer) {
+        return this.frozenArrows.some((arrow) => (
+            arrow?.active &&
+            arrow.getData('ownerIsPlayer') === actorIsPlayer &&
+            !arrow.getData('hasResolved')
+        ));
+    }
+
+    getLaunchVelocity(actor, pos) {
+        return {
+            vx: (actor.x - pos.x) * LAUNCH_MUL,
+            vy: (actor.y - pos.y) * LAUNCH_MUL
+        };
+    }
+
+    isLaunchDirectionValid(vx) {
+        return this.isPlayerTurn ? vx > 20 : vx < -20;
+    }
+
+    getAnimationKey(shooterIsPlayer, state) {
+        const actorPrefix = shooterIsPlayer ? 'player' : 'enemy';
+        return `${actorPrefix}-${state}`;
+    }
+
+    startPlanningRound() {
+        if (this.isMatchOver) return;
+
+        this.frozenArrows = [];
+        this.isPlayerTurn = true;
+        this.isInputLocked = false;
+        this.isVolleyInFlight = false;
+        this.isDragging = false;
+        this.updateTurnIndicator();
+    }
+
+    resolveArrow(arrow, destroyDelay = 0, destroyImmediately = false) {
+        if (!arrow || arrow.getData('hasResolved')) return;
+
+        arrow.setData('hasResolved', true);
+        this.markArrowResolved();
+
+        if (destroyImmediately) {
+            arrow.destroy();
+            return;
+        }
+
+        this.time.delayedCall(destroyDelay, () => {
+            if (arrow?.active) arrow.destroy();
+        });
+    }
+
+    markArrowResolved() {
+        if (!this.isVolleyInFlight) return;
+
+        this.activeVolleyArrows = Math.max(0, this.activeVolleyArrows - 1);
+        if (this.activeVolleyArrows > 0 || this.isMatchOver) return;
+
+        this.time.delayedCall(250, () => {
+            if (this.isMatchOver) return;
+            this.startPlanningRound();
         });
     }
 }
