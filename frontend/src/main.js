@@ -20,6 +20,21 @@ const ENEMY_HITBOX = { width: 22, height: 38, offsetX: 21, offsetY: 16 };
 const ARROW_HITBOX = { width: 14, height: 5, offsetX: 8, offsetY: 8 };
 const ARROW_HIT_LINGER_MS = 180;
 const ARROW_HIT_EMBED_PX = 10;
+const COLLISION_WINNER_SPEED_RETENTION = 0.65;
+const PROJECTILE_CONFIG = {
+    arrow: {
+        power: 1,
+        tint: 0xffffff,
+        scale: 1.5,
+        trailColor: 0xff6600
+    },
+    agneyastra: {
+        power: 3,
+        tint: 0xff7a1a,
+        scale: 1.7,
+        trailColor: 0xffa347
+    }
+};
 
 class GameScene extends Phaser.Scene {
     constructor() {
@@ -493,10 +508,13 @@ class GameScene extends Phaser.Scene {
 
     instantiateArrowProjectile(shooterIsPlayer, vx, vy) {
         const shooter = shooterIsPlayer ? this.player : this.enemy;
+        const projectileType = this.getProjectileType(shooterIsPlayer);
+        const projectileConfig = PROJECTILE_CONFIG[projectileType];
         const arrowStartX = shooter.x + (shooterIsPlayer ? 30 : -30);
         const arrow = this.physics.add.image(arrowStartX, shooter.y - 10, 'arrow')
             .setDepth(7)
-            .setScale(1.5);
+            .setScale(projectileConfig.scale)
+            .setTint(projectileConfig.tint);
         this.arrowGroup.add(arrow);
 
         arrow.body.setSize(ARROW_HITBOX.width, ARROW_HITBOX.height);
@@ -507,6 +525,9 @@ class GameScene extends Phaser.Scene {
         arrow.setData('isArrow', true);
         arrow.setData('isLaunched', true);
         arrow.setData('ownerIsPlayer', shooterIsPlayer);
+        arrow.setData('projectileType', projectileType);
+        arrow.setData('power', projectileConfig.power);
+        arrow.setData('trailColor', projectileConfig.trailColor);
         arrow.setRotation(Math.atan2(vy, vx));
         arrow.body.setAllowGravity(true);
         arrow.setVelocity(vx, vy);
@@ -600,19 +621,31 @@ class GameScene extends Phaser.Scene {
 
         const impactX = (firstArrow.x + secondArrow.x) / 2;
         const impactY = (firstArrow.y + secondArrow.y) / 2;
-
-        [firstArrow, secondArrow].forEach((arrow) => {
-            arrow.body.setVelocity(0, 0);
-            arrow.body.setAngularVelocity(0);
-            arrow.body.setAllowGravity(false);
-            arrow.body.enable = false;
-            arrow.setData('isArrow', false);
-            arrow.setData('isLaunched', false);
-        });
-
+        const firstPower = firstArrow.getData('power') ?? 1;
+        const secondPower = secondArrow.getData('power') ?? 1;
         this.spawnImpactFlash(impactX, impactY);
-        this.resolveArrow(firstArrow, 0, true);
-        this.resolveArrow(secondArrow, 0, true);
+
+        if (firstPower === secondPower) {
+            [firstArrow, secondArrow].forEach((arrow) => {
+                this.disableProjectile(arrow);
+                this.resolveArrow(arrow, 0, true);
+            });
+            return;
+        }
+
+        const winnerArrow = firstPower > secondPower ? firstArrow : secondArrow;
+        const loserArrow = winnerArrow === firstArrow ? secondArrow : firstArrow;
+        const loserPower = loserArrow.getData('power') ?? 1;
+        const winningVelocity = new Phaser.Math.Vector2(winnerArrow.body.velocity.x, winnerArrow.body.velocity.y)
+            .scale(COLLISION_WINNER_SPEED_RETENTION);
+
+        this.disableProjectile(loserArrow);
+        this.resolveArrow(loserArrow, 0, true);
+
+        winnerArrow.body.setVelocity(winningVelocity.x, winningVelocity.y);
+        winnerArrow.setData('launchVx', winningVelocity.x);
+        winnerArrow.setData('launchVy', winningVelocity.y);
+        winnerArrow.setData('power', Math.max(0, firstPower > secondPower ? firstPower - loserPower : secondPower - loserPower));
     }
 
     applyDamageToEnemy(damageAmount) {
@@ -704,7 +737,7 @@ class GameScene extends Phaser.Scene {
             scaleX: 2.1,
             scaleY: 2.1,
             alpha: 0,
-            duration: 140,
+            duration: 240,
             ease: 'Quad.easeOut',
             onComplete: () => {
                 flash.destroy();
@@ -722,7 +755,7 @@ class GameScene extends Phaser.Scene {
                 if (!arrowInstance.getData('isLaunched')) return;
 
                 const trail = this.add.graphics().setDepth(6);
-                trail.fillStyle(0xFF6600, 0.35);
+                trail.fillStyle(arrowInstance.getData('trailColor') ?? 0xFF6600, 0.35);
                 trail.fillCircle(arrowInstance.x, arrowInstance.y, 5);
 
                 this.tweens.add({
@@ -747,6 +780,10 @@ class GameScene extends Phaser.Scene {
 
     getActiveActor() {
         return this.isPlayerTurn ? this.player : this.enemy;
+    }
+
+    getProjectileType(shooterIsPlayer) {
+        return shooterIsPlayer ? 'arrow' : 'agneyastra';
     }
 
     hasShotQueuedForCurrentTurn() {
@@ -778,6 +815,17 @@ class GameScene extends Phaser.Scene {
         this.isVolleyInFlight = false;
         this.isDragging = false;
         this.updateTurnIndicator();
+    }
+
+    disableProjectile(arrow) {
+        if (!arrow?.body) return;
+
+        arrow.body.setVelocity(0, 0);
+        arrow.body.setAngularVelocity(0);
+        arrow.body.setAllowGravity(false);
+        arrow.body.enable = false;
+        arrow.setData('isArrow', false);
+        arrow.setData('isLaunched', false);
     }
 
     resolveArrow(arrow, destroyDelay = 0, destroyImmediately = false) {
