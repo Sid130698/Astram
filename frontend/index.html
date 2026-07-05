@@ -9,15 +9,60 @@
       margin: 0;
       padding: 0;
       background-color: #111;
-      display: flex;
-      justify-content: center;
-      align-items: center;
+      width: 100vw;
       height: 100vh;
       overflow: hidden;
     }
   </style>
 </head>
 <body>
+  <div id="main-menu" style="position: absolute; width: 100vw; height: 100vh; background: #111; z-index: 1000; display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: 'Georgia', serif; color: #FFD700;">
+    <h1 style="font-size: 64px; text-shadow: 0 0 20px #FF6600; margin-bottom: 10px;">ASTRAM</h1>
+    <h2 style="font-size: 24px; color: #FFCC88; margin-bottom: 50px;">— Divine Archery Battle —</h2>
+    
+    <div id="mode-selection" style="display: flex; flex-direction: column; gap: 20px; align-items: center;">
+      <button onclick="startGame('cpu')" class="menu-btn">Play vs CPU</button>
+      <button onclick="startGame('p2')" class="menu-btn">Play vs Player 2</button>
+    </div>
+  </div>
+
+  <style>
+    .menu-btn {
+      background: #4a2f1d;
+      color: #ffffff;
+      border: 2px solid #FFD700;
+      padding: 15px 40px;
+      font-size: 24px;
+      font-family: 'Georgia', serif;
+      cursor: pointer;
+      border-radius: 8px;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+    }
+    .menu-btn:hover, .menu-btn:focus {
+      background: #FFD700;
+      color: #111;
+      transform: scale(1.05);
+      box-shadow: 0 0 15px #FFD700;
+      outline: none;
+    }
+  </style>
+
+  <script>
+    window.isVsCPU = true;
+    window.selectedMap = '/battleground.png';
+    window.gameStarted = false;
+
+    function startGame(mode) {
+      window.isVsCPU = (mode === 'cpu');
+      document.getElementById('main-menu').style.display = 'none';
+      window.gameStarted = true;
+      if (window.onGameStart) {
+        window.onGameStart();
+      }
+    }
+  </script>
+
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { handleBrahmastraCollision } from './brahmastra.js';
 
 // ─── ANIMATION FRAME MAP (single horizontal strip) ───────────────
 const ANIM = {
@@ -19,29 +20,39 @@ const PLAYER_TEXTURE_KEY = 'archer';
 const ENEMY_TEXTURE_KEY = 'archer-enemy';
 const PLAYER_HITBOX = { width: 22, height: 38, offsetX: 21, offsetY: 16 };
 const ENEMY_HITBOX = { width: 22, height: 38, offsetX: 21, offsetY: 16 };
-const ARROW_HITBOX = { width: 14, height: 5, offsetX: 8, offsetY: 8 };
-const AGNEYASTRA_HITBOX = { width: 52, height: 24, offsetX: 68, offsetY: 40 };
+const ARROW_HITBOX = { width: 21, height: 8, offsetX: 8, offsetY: 8 };
+const AGNEYASTRA_HITBOX = { width: 78, height: 36, offsetX: 68, offsetY: 40 };
+const BRAHMASTRA_HITBOX = { width: 90, height: 44, offsetX: 68, offsetY: 40 };
 const ARROW_HIT_LINGER_MS = 180;
 const ARROW_HIT_EMBED_PX = 10;
-const COLLISION_WINNER_SPEED_RETENTION = 0.65;
+const COLLISION_WINNER_SPEED_RETENTION = 1.0;
 const PROJECTILE_CONFIG = {
     arrow: {
         label: 'Arrow',
-        damage: 10,
-        power: 10,
+        damage: 20,
+        power: 20,
         ammo: null,
         tint: 0xffffff,
-        scale: 1.5,
+        scale: 2.25,
         trailColor: 0xff6600
     },
     agneyastra: {
         label: 'Agneyastra',
-        damage: 25,
-        power: 25,
+        damage: 50,
+        power: 50,
         ammo: 3,
         tint: 0xffffff,
-        scale: 0.36,
+        scale: 0.55,
         trailColor: 0xffa347
+    },
+    brahmastra: {
+        label: 'Brahma',
+        damage: 9999,
+        power: 9999,
+        ammo: 1,
+        tint: 0x99ccff,
+        scale: 0.8,
+        trailColor: 0x66bbff
     }
 };
 
@@ -68,7 +79,8 @@ class GameScene extends Phaser.Scene {
         this.globalPointer = { x: 0, y: 0 };
         this.queuedShots   = { player: null, enemy: null };
         this.selectedProjectile = { player: 'arrow', enemy: 'arrow' };
-        this.remainingAmmo = { player: { agneyastra: 3 }, enemy: { agneyastra: 3 } };
+        this.remainingAmmo = { player: { agneyastra: 3, brahmastra: 1 }, enemy: { agneyastra: 3, brahmastra: 1 } };
+        this.roundNumber = 0;
         this.activeVolleyArrows = 0;
         this.isInputLocked = false;
         this.isVolleyInFlight = false;
@@ -76,6 +88,7 @@ class GameScene extends Phaser.Scene {
         this.handleMouseUp = null;
         this.handleTouchMove = null;
         this.handleTouchEnd = null;
+        this.isHitStopActive = false;
     }
 
     // ─── LIFECYCLE HOOKS ──────────────────────────────────────────
@@ -110,6 +123,33 @@ class GameScene extends Phaser.Scene {
 
     update() {
         this.executeRealTimeRotations();
+    }
+
+    executeAITurn() {
+        if (this.isMatchOver || this.isPlayerTurn || this.queuedShots.enemy) return;
+        
+        const randVx = -Phaser.Math.Between(300, 700);
+        const randVy = -Phaser.Math.Between(150, 600);
+        
+        if (this.remainingAmmo.enemy.agneyastra > 0 && Math.random() < 0.3) {
+            this.handleProjectileSelection('agneyastra');
+        } else if (this.remainingAmmo.enemy.brahmastra > 0 && this.roundNumber >= 3 && Math.random() < 0.2) {
+            this.handleProjectileSelection('brahmastra');
+        } else {
+            this.handleProjectileSelection('arrow');
+        }
+
+        const projectileType = this.selectedProjectile.enemy;
+        this.queuedShots.enemy = { vx: randVx, vy: randVy, projectileType };
+        this.consumeProjectileAmmo('enemy', projectileType);
+        
+        this.enemy.play(this.getAnimationKey(false, 'idle'));
+
+        if (this.queuedShots.player && this.queuedShots.enemy) {
+            this.releaseQueuedShots();
+        } else {
+            this.updateTurnIndicator();
+        }
     }
 
     // ==========================================
@@ -197,7 +237,8 @@ class GameScene extends Phaser.Scene {
 
         this.selectionButtons = [
             this.createProjectileButton(0, 0, 'arrow'),
-            this.createProjectileButton(0, 0, 'agneyastra')
+            this.createProjectileButton(0, 0, 'agneyastra'),
+            this.createProjectileButton(0, 0, 'brahmastra')
         ];
     }
 
@@ -207,16 +248,23 @@ class GameScene extends Phaser.Scene {
         bg.setInteractive({ useHandCursor: true });
         bg.on('pointerdown', () => this.handleProjectileSelection(projectileType));
 
-        const iconTexture = projectileType === 'agneyastra'
-            ? `${AGNEYASTRA_FRAME_KEY_PREFIX}01`
-            : 'arrow';
-        const icon = this.add.image(x, y, iconTexture)
-            .setScale(projectileType === 'agneyastra' ? 0.22 : 0.72)
-            .setDepth(19);
-        icon.setRotation(projectileType === 'agneyastra' ? -0.08 : 0);
+        let iconTexture = 'arrow';
+        if (projectileType === 'agneyastra' || projectileType === 'brahmastra') iconTexture = `${AGNEYASTRA_FRAME_KEY_PREFIX}01`;
+        
+        let scale = 0.72;
+        if (projectileType === 'agneyastra') scale = 0.22;
+        if (projectileType === 'brahmastra') scale = 0.32;
 
-        const label = this.add.text(x, y + 33, projectileType === 'agneyastra' ? 'Agni' : 'Arrow', {
-            fontSize: '10px',
+        const icon = this.add.image(x, y, iconTexture).setScale(scale).setDepth(19);
+        icon.setRotation(projectileType === 'arrow' ? 0 : -0.08);
+        if (projectileType === 'brahmastra') icon.setTint(0x99ccff);
+
+        let name = 'Arrow';
+        if (projectileType === 'agneyastra') name = 'Agni';
+        if (projectileType === 'brahmastra') name = 'Brahma';
+
+        const label = this.add.text(x, y + 35, name, {
+            fontSize: '14px',
             fontFamily: 'Georgia, serif',
             color: '#f5e7bf'
         }).setOrigin(0.5).setDepth(19);
@@ -245,6 +293,25 @@ class GameScene extends Phaser.Scene {
             stroke: '#000000',
             strokeThickness: 8
         }).setOrigin(0.5).setDepth(41).setVisible(false);
+
+        this.playAgainButton = this.add.text(400, 420, 'PLAY AGAIN', {
+            fontSize: '28px',
+            fontFamily: 'Georgia, serif',
+            color: '#ffffff',
+            backgroundColor: '#4a2f1d',
+            padding: { x: 20, y: 10 },
+            stroke: '#000000',
+            strokeThickness: 4
+        })
+        .setOrigin(0.5)
+        .setDepth(41)
+        .setInteractive({ useHandCursor: true })
+        .setVisible(false)
+        .on('pointerdown', () => {
+            window.location.reload();
+        })
+        .on('pointerover', () => this.playAgainButton.setStyle({ fill: '#FFD700' }))
+        .on('pointerout', () => this.playAgainButton.setStyle({ fill: '#ffffff' }));
     }
 
     initializeAnimations() {
@@ -412,6 +479,12 @@ class GameScene extends Phaser.Scene {
     // ==========================================
 
     initializeInputPipeline() {
+        if (!window.gameStarted) {
+            this.scene.pause();
+            window.onGameStart = () => {
+                this.scene.resume();
+            };
+        }
         this.input.on('pointerdown', this.handlePointerDown, this);
 
         // Bind global browser mouse event proxies to calculate off-canvas coordinates
@@ -575,14 +648,18 @@ class GameScene extends Phaser.Scene {
         }
 
         this.updateTurnIndicator();
+
+        if (!this.isPlayerTurn && window.isVsCPU && !this.isVolleyInFlight) {
+            this.time.delayedCall(800, () => this.executeAITurn());
+        }
     }
 
     instantiateArrowProjectile(shooterIsPlayer, vx, vy, projectileType) {
         const shooter = shooterIsPlayer ? this.player : this.enemy;
         const projectileConfig = PROJECTILE_CONFIG[projectileType];
-        const textureKey = projectileType === 'agneyastra'
-            ? `${AGNEYASTRA_FRAME_KEY_PREFIX}01`
-            : 'arrow';
+        let textureKey = 'arrow';
+        if (projectileType === 'agneyastra' || projectileType === 'brahmastra') textureKey = `${AGNEYASTRA_FRAME_KEY_PREFIX}01`;
+
         const arrowStartX = shooter.x + (shooterIsPlayer ? 30 : -30);
         const arrow = this.physics.add.image(arrowStartX, shooter.y - 10, textureKey)
             .setDepth(7)
@@ -590,7 +667,9 @@ class GameScene extends Phaser.Scene {
             .setTint(projectileConfig.tint);
         this.arrowGroup.add(arrow);
 
-        const projectileHitbox = projectileType === 'agneyastra' ? AGNEYASTRA_HITBOX : ARROW_HITBOX;
+        let projectileHitbox = ARROW_HITBOX;
+        if (projectileType === 'agneyastra') projectileHitbox = AGNEYASTRA_HITBOX;
+        if (projectileType === 'brahmastra') projectileHitbox = BRAHMASTRA_HITBOX;
         arrow.body.setSize(projectileHitbox.width, projectileHitbox.height);
         arrow.body.setOffset(projectileHitbox.offsetX, projectileHitbox.offsetY);
         arrow.setData('launchVx', vx);
@@ -606,7 +685,7 @@ class GameScene extends Phaser.Scene {
         arrow.body.setAllowGravity(true);
         arrow.setVelocity(vx, vy);
 
-        if (projectileType === 'agneyastra') {
+        if (projectileType === 'agneyastra' || projectileType === 'brahmastra') {
             this.attachAgneyastraAnimation(arrow);
         }
 
@@ -614,7 +693,7 @@ class GameScene extends Phaser.Scene {
         this.registerTargetHitOverlap(arrow, shooterIsPlayer);
         this.spawnParticleTrail(arrow);
 
-        this.time.delayedCall(3500, () => {
+        this.time.delayedCall(8000, () => {
             if (arrow?.active) this.resolveArrow(arrow, 0, true);
         });
 
@@ -662,7 +741,7 @@ class GameScene extends Phaser.Scene {
             arrowObj.body.setAllowGravity(false);
             arrowObj.body.enable = false;
             arrowObj.setData('isArrow', false);
-            if (arrowObj.getData('projectileType') === 'agneyastra') {
+            if (arrowObj.getData('projectileType') === 'agneyastra' || arrowObj.getData('projectileType') === 'brahmastra') {
                 this.spawnFireExplosion(impactX, impactY);
             }
             this.resolveArrow(arrowObj, 350, false);
@@ -687,8 +766,10 @@ class GameScene extends Phaser.Scene {
             arrowObj.y += embedDirection.y * ARROW_HIT_EMBED_PX;
             arrowObj.setData('isArrow', false);
             const projectileType = arrowObj.getData('projectileType');
-            const damage = PROJECTILE_CONFIG[projectileType]?.damage ?? 10;
-            if (projectileType === 'agneyastra') {
+            const baseDamage = PROJECTILE_CONFIG[projectileType]?.damage ?? 10;
+            const currentPower = arrowObj.getData('power');
+            const damage = currentPower !== undefined ? currentPower : baseDamage;
+            if (projectileType === 'agneyastra' || projectileType === 'brahmastra') {
                 this.spawnFireExplosion(arrowObj.x, arrowObj.y);
                 this.flashDamageScreen();
             }
@@ -709,11 +790,59 @@ class GameScene extends Phaser.Scene {
         if (firstArrow.getData('hasResolved') || secondArrow.getData('hasResolved')) return;
         if (!firstArrow.getData('isLaunched') || !secondArrow.getData('isLaunched')) return;
 
+        const type1 = firstArrow.getData('projectileType');
+        const type2 = secondArrow.getData('projectileType');
+        
+        const isBrahma1 = type1 === 'brahmastra';
+        const isBrahma2 = type2 === 'brahmastra';
+        const isAgni1 = type1 === 'agneyastra';
+        const isAgni2 = type2 === 'agneyastra';
+
+        if ((isBrahma1 && isBrahma2) || (isBrahma1 && isAgni2) || (isAgni1 && isBrahma2)) {
+            handleBrahmastraCollision(this, firstArrow, secondArrow);
+            return;
+        }
+
         const impactX = (firstArrow.x + secondArrow.x) / 2;
         const impactY = (firstArrow.y + secondArrow.y) / 2;
         const firstPower = firstArrow.getData('power') ?? 1;
         const secondPower = secondArrow.getData('power') ?? 1;
         this.spawnImpactFlash(impactX, impactY);
+
+        // --- MICRO-FREEZE CLASH MECHANIC ---
+        const isAgniVsAgni = type1 === 'agneyastra' && type2 === 'agneyastra';
+        if (isAgniVsAgni && !this.isHitStopActive) {
+            this.isHitStopActive = true;
+
+            // 1. Hit-Stop (Time Freeze)
+            this.physics.pause();
+            if (this.player.anims.isPlaying) this.player.anims.pause();
+            if (this.enemy.anims.isPlaying) this.enemy.anims.pause();
+
+            // 2. Screen Shake
+            this.cameras.main.shake(200, 0.05);
+
+            // 3. Visual Impact
+            this.cameras.main.flash(200, 255, 255, 255);
+
+            // 4. Knockback (after 200ms)
+            this.time.delayedCall(200, () => {
+                this.isHitStopActive = false;
+                
+                // Prevent unpausing if the match ended on this exact frame
+                if (this.isMatchOver) return;
+
+                this.physics.resume();
+                if (this.player.anims.isPaused) this.player.anims.resume();
+                if (this.enemy.anims.isPaused) this.enemy.anims.resume();
+
+                this.player.setDragX(800);
+                this.enemy.setDragX(800);
+                this.player.setVelocityX(-400);
+                this.enemy.setVelocityX(400);
+            });
+        }
+        // -----------------------------------
 
         if (firstPower === secondPower) {
             [firstArrow, secondArrow].forEach((arrow) => {
@@ -815,6 +944,10 @@ class GameScene extends Phaser.Scene {
             .setText(resultText)
             .setColor(textColor)
             .setVisible(true);
+            
+        if (this.playAgainButton) {
+            this.playAgainButton.setVisible(true);
+        }
     }
 
     spawnImpactFlash(x, y) {
@@ -846,12 +979,13 @@ class GameScene extends Phaser.Scene {
 
                 const projectileType = arrowInstance.getData('projectileType');
                 const trail = this.add.graphics().setDepth(6);
-                trail.fillStyle(arrowInstance.getData('trailColor') ?? 0xFF6600, projectileType === 'agneyastra' ? 0.5 : 0.35);
-                trail.fillCircle(arrowInstance.x, arrowInstance.y, projectileType === 'agneyastra' ? 7 : 5);
+                const isBig = projectileType === 'agneyastra' || projectileType === 'brahmastra';
+                trail.fillStyle(arrowInstance.getData('trailColor') ?? 0xFF6600, isBig ? 0.5 : 0.35);
+                trail.fillCircle(arrowInstance.x, arrowInstance.y, isBig ? 7 : 5);
 
-                if (projectileType === 'agneyastra') {
+                if (isBig) {
                     trail.fillStyle(0xfff0b3, 0.55);
-                    trail.fillCircle(arrowInstance.x, arrowInstance.y, 3.5);
+                    trail.fillCircle(arrowInstance.x, arrowInstance.y, projectileType === 'brahmastra' ? 5 : 3.5);
                 }
 
                 this.tweens.add({
@@ -949,7 +1083,12 @@ class GameScene extends Phaser.Scene {
             icon.setAlpha(alpha);
             icon.setVisible(isVisible);
 
-            label.setText(projectileType === 'agneyastra' ? `Agni ${ammoText}` : `Arrow ${ammoText}`);
+            let labelText = `Arrow ${ammoText}`;
+            if (projectileType === 'agneyastra') labelText = `Agni ${ammoText}`;
+            if (projectileType === 'brahmastra') {
+                labelText = this.roundNumber < 3 ? 'Locked' : `Brahma ${ammoText}`;
+            }
+            label.setText(labelText);
             label.setColor(isSelected ? '#201006' : '#f5e7bf');
             label.setAlpha(alpha);
             label.setVisible(isVisible);
@@ -975,6 +1114,7 @@ class GameScene extends Phaser.Scene {
     }
 
     canSelectProjectile(selectionKey, projectileType) {
+        if (projectileType === 'brahmastra' && this.roundNumber < 3) return false;
         const ammoLimit = PROJECTILE_CONFIG[projectileType]?.ammo;
         if (ammoLimit == null) return true;
         return (this.remainingAmmo[selectionKey]?.[projectileType] ?? 0) > 0;
@@ -1003,6 +1143,7 @@ class GameScene extends Phaser.Scene {
     startPlanningRound() {
         if (this.isMatchOver) return;
 
+        this.roundNumber++;
         this.queuedShots = { player: null, enemy: null };
         this.isPlayerTurn = true;
         this.isInputLocked = false;
@@ -1088,8 +1229,12 @@ class GameScene extends Phaser.Scene {
 // ─── STABLE CORE APPLICATION FRAMEWORK PROPERTIES ─────────────────
 const config = {
     type: Phaser.AUTO,
-    width: 800,
-    height: 600,
+    scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: 800,
+        height: 600
+    },
     backgroundColor: '#0a0800',
     physics: {
         default: 'arcade',
