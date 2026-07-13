@@ -21,6 +21,15 @@
     <h2 style="font-size: 24px; color: #FFCC88; margin-bottom: 50px;">— Divine Archery Battle —</h2>
     
     <div id="mode-selection" style="display: flex; flex-direction: column; gap: 20px; align-items: center;">
+      <div style="display: flex; gap: 10px; align-items: center;">
+        <label for="ai-difficulty" style="font-size: 18px; color: #f5e7bf;">CPU Difficulty:</label>
+        <select id="ai-difficulty" style="padding: 5px 10px; font-size: 16px; background: #4a2f1d; color: #FFD700; border: 2px solid #FFD700; border-radius: 4px; cursor: pointer; outline: none;">
+          <option value="easy">Easy</option>
+          <option value="medium" selected>Medium</option>
+          <option value="hard">Hard</option>
+          <option value="hardest">Hardest</option>
+        </select>
+      </div>
       <button onclick="startGame('cpu')" class="menu-btn">Play vs CPU</button>
       <button onclick="startGame('p2')" class="menu-btn">Play vs Player 2</button>
     </div>
@@ -52,9 +61,13 @@
     window.isVsCPU = true;
     window.selectedMap = '/battleground.png';
     window.gameStarted = false;
+    window.aiDifficulty = 'medium';
 
     function startGame(mode) {
       window.isVsCPU = (mode === 'cpu');
+      if (window.isVsCPU) {
+        window.aiDifficulty = document.getElementById('ai-difficulty').value;
+      }
       document.getElementById('main-menu').style.display = 'none';
       window.gameStarted = true;
       if (window.onGameStart) {

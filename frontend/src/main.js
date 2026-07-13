@@ -26,6 +26,7 @@ const BRAHMASTRA_HITBOX = { width: 90, height: 44, offsetX: 68, offsetY: 40 };
 const ARROW_HIT_LINGER_MS = 180;
 const ARROW_HIT_EMBED_PX = 10;
 const COLLISION_WINNER_SPEED_RETENTION = 1.0;
+const KNOCKBACK_RESTORE_MS = 240;
 const PROJECTILE_CONFIG = {
     arrow: {
         label: 'Arrow',
@@ -125,22 +126,87 @@ class GameScene extends Phaser.Scene {
         this.executeRealTimeRotations();
     }
 
+    calculateSmartAIAim() {
+        const dx = this.player.x - this.enemy.x;
+        const dy = this.player.y - this.enemy.y;
+        
+        // Choose a random arch height/vy
+        const vy = -Phaser.Math.Between(250, 500);
+        
+        // dy = vy * t + 0.5 * g * t^2
+        // 0.5*g*t^2 + vy*t - dy = 0
+        const a = 0.5 * GRAVITY;
+        const b = vy;
+        const c = -dy;
+        
+        // quadratic formula
+        const discriminant = b*b - 4*a*c;
+        let t = 1; // fallback
+        if (discriminant > 0) {
+            t = (-b + Math.sqrt(discriminant)) / (2 * a);
+        }
+        
+        // add difficulty-based error
+        let hitChance = 0.4;
+        let weaponUseChance = { agneyastra: 0.1, brahmastra: 0.05 };
+        const difficulty = window.aiDifficulty || 'medium';
+        
+        switch (difficulty) {
+            case 'easy': 
+                hitChance = 0.1; // poor aim (~10% hit rate)
+                weaponUseChance = { agneyastra: 0.05, brahmastra: 0 };
+                break;
+            case 'medium': 
+                hitChance = 0.4; // 2/5 arrows will hit
+                weaponUseChance = { agneyastra: 0.3, brahmastra: 0.2 };
+                break;
+            case 'hard': 
+                hitChance = 0.6; // 3/5 arrows will hit
+                weaponUseChance = { agneyastra: 0.5, brahmastra: 0.4 };
+                break;
+            case 'hardest': 
+                hitChance = 1.0; // 5/5 arrows will hit (100%)
+                weaponUseChance = { agneyastra: 0.8, brahmastra: 0.9 };
+                break;
+        }
+        
+        let errorMargin = 0;
+        const willHit = Math.random() < hitChance;
+        
+        if (!willHit) {
+            // Pick an error margin that guarantees a miss (either overshoot or undershoot)
+            const isOvershoot = Math.random() > 0.5;
+            if (isOvershoot) {
+                // Shoot past the player
+                errorMargin = Phaser.Math.Between(-150, -60); 
+            } else {
+                // Shoot short of the player
+                errorMargin = Phaser.Math.Between(60, 150);
+            }
+        }
+        
+        const targetX = this.player.x + errorMargin;
+        const realDx = targetX - this.enemy.x;
+        const vx = realDx / t;
+        
+        return { vx, vy, weaponUseChance };
+    }
+
     executeAITurn() {
         if (this.isMatchOver || this.isPlayerTurn || this.queuedShots.enemy) return;
         
-        const randVx = -Phaser.Math.Between(300, 700);
-        const randVy = -Phaser.Math.Between(150, 600);
+        const aim = this.calculateSmartAIAim();
         
-        if (this.remainingAmmo.enemy.agneyastra > 0 && Math.random() < 0.3) {
+        if (this.remainingAmmo.enemy.agneyastra > 0 && Math.random() < aim.weaponUseChance.agneyastra) {
             this.handleProjectileSelection('agneyastra');
-        } else if (this.remainingAmmo.enemy.brahmastra > 0 && this.roundNumber >= 3 && Math.random() < 0.2) {
+        } else if (this.remainingAmmo.enemy.brahmastra > 0 && this.roundNumber >= 3 && Math.random() < aim.weaponUseChance.brahmastra) {
             this.handleProjectileSelection('brahmastra');
         } else {
             this.handleProjectileSelection('arrow');
         }
 
         const projectileType = this.selectedProjectile.enemy;
-        this.queuedShots.enemy = { vx: randVx, vy: randVy, projectileType };
+        this.queuedShots.enemy = { vx: aim.vx, vy: aim.vy, projectileType };
         this.consumeProjectileAmmo('enemy', projectileType);
         
         this.enemy.play(this.getAnimationKey(false, 'idle'));
@@ -836,10 +902,7 @@ class GameScene extends Phaser.Scene {
                 if (this.player.anims.isPaused) this.player.anims.resume();
                 if (this.enemy.anims.isPaused) this.enemy.anims.resume();
 
-                this.player.setDragX(800);
-                this.enemy.setDragX(800);
-                this.player.setVelocityX(-400);
-                this.enemy.setVelocityX(400);
+                this.triggerKnockback(-400, 400);
             });
         }
         // -----------------------------------
@@ -908,6 +971,27 @@ class GameScene extends Phaser.Scene {
         this.player.setTint(0xffd2d2);
         this.time.delayedCall(120, () => {
             if (this.player?.active) this.player.clearTint();
+        });
+    }
+
+    triggerKnockback(playerVelocityX, enemyVelocityX, restoreDelayMs = KNOCKBACK_RESTORE_MS) {
+        const playerStart = { x: this.player.x, y: this.player.y };
+        const enemyStart = { x: this.enemy.x, y: this.enemy.y };
+
+        this.player.setDragX(800);
+        this.enemy.setDragX(800);
+        this.player.setVelocityX(playerVelocityX);
+        this.enemy.setVelocityX(enemyVelocityX);
+
+        this.time.delayedCall(restoreDelayMs, () => {
+            if (this.isMatchOver) return;
+
+            this.player.setVelocity(0, 0);
+            this.enemy.setVelocity(0, 0);
+            this.player.setDragX(0);
+            this.enemy.setDragX(0);
+            this.player.setPosition(playerStart.x, playerStart.y);
+            this.enemy.setPosition(enemyStart.x, enemyStart.y);
         });
     }
 

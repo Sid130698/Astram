@@ -31,10 +31,7 @@ export function handleBrahmastraCollision(scene, arrow1, arrow2) {
             if (scene.enemy.anims.isPaused) scene.enemy.anims.resume();
 
             // Huge Knockback
-            scene.player.setDragX(800);
-            scene.enemy.setDragX(800);
-            scene.player.setVelocityX(-600);
-            scene.enemy.setVelocityX(600);
+            scene.triggerKnockback(-600, 600);
         });
     }
 
